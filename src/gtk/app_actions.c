@@ -72,6 +72,16 @@ static void on_workspace_close_confirmed(gboolean confirmed, gpointer user_data)
 static void on_tab_close_confirmed(gboolean confirmed, gpointer user_data);
 static void on_browser_tab_close_confirmed(gboolean confirmed,
                                            gpointer user_data);
+static gboolean focus_direction_for_layout_with_error(Workspace *ws,
+                                                      int dx,
+                                                      int dy,
+                                                      const char *action,
+                                                      const char **error_out);
+static gboolean split_current_for_layout_action_with_error(
+    Workspace *ws,
+    GtkOrientation orientation,
+    const char *action,
+    const char **error_out);
 
 static gboolean
 is_modifier_key(guint keyval)
@@ -93,6 +103,30 @@ is_modifier_key(guint keyval)
     default:
         return FALSE;
     }
+}
+
+static void
+log_strip_unsupported_action(const char *action)
+{
+    if (!action)
+        return;
+    g_warning("Action '%s' is not supported in strip layout", action);
+}
+
+static gboolean
+set_action_error(const char **error_out, const char *message)
+{
+    if (error_out)
+        *error_out = message;
+    return FALSE;
+}
+
+static gboolean
+set_default_action_error(const char **error_out, const char *message)
+{
+    if (error_out && *error_out)
+        return FALSE;
+    return set_action_error(error_out, message);
 }
 
 static void
@@ -339,10 +373,81 @@ on_pane_close_confirmed(gboolean confirmed, gpointer user_data)
 {
     PendingPaneClose *pending = user_data;
 
-    if (confirmed && pending->ws && pending->pane) {
-        workspace_close_pane(pending->ws, pending->pane);
-        session_queue_save();
+    if (!confirmed || !pending || !pending->ws)
+        return;
+
+    if (workspace_get_layout_mode(pending->ws) == WORKSPACE_LAYOUT_CLASSIC) {
+        if (pending->pane) {
+            workspace_close_pane(pending->ws, pending->pane);
+            session_queue_save();
+        }
+        return;
     }
+
+    if (pending->pane)
+        workspace_focus_pane(pending->ws, pending->pane);
+
+    if (workspace_close_current_for_layout(pending->ws))
+        session_queue_save();
+}
+
+static gboolean
+focus_direction_for_layout(Workspace *ws, int dx, int dy, const char *action)
+{
+    return focus_direction_for_layout_with_error(ws, dx, dy, action, NULL);
+}
+
+static gboolean
+focus_direction_for_layout_with_error(Workspace *ws,
+                                      int dx,
+                                      int dy,
+                                      const char *action,
+                                      const char **error_out)
+{
+    if (!ws)
+        return set_action_error(error_out, "no active workspace");
+
+    if (workspace_get_layout_mode(ws) != WORKSPACE_LAYOUT_STRIP) {
+        workspace_navigate_pane(ws, dx, dy);
+        return TRUE;
+    }
+
+    if (dx < 0 && dy == 0)
+        return workspace_focus_prev_for_layout(ws);
+    if (dx > 0 && dy == 0)
+        return workspace_focus_next_for_layout(ws);
+
+    log_strip_unsupported_action(action);
+    return set_action_error(error_out,
+                            "action is unsupported in strip layout");
+}
+
+static gboolean
+split_current_for_layout_action(Workspace *ws,
+                                GtkOrientation orientation,
+                                const char *action)
+{
+    return split_current_for_layout_action_with_error(ws, orientation,
+                                                      action, NULL);
+}
+
+static gboolean
+split_current_for_layout_action_with_error(Workspace *ws,
+                                           GtkOrientation orientation,
+                                           const char *action,
+                                           const char **error_out)
+{
+    if (!ws)
+        return set_action_error(error_out, "no active workspace");
+
+    if (!workspace_split_current_for_layout(ws, orientation, g_ghostty_app)) {
+        if (workspace_get_layout_mode(ws) == WORKSPACE_LAYOUT_STRIP)
+            log_strip_unsupported_action(action);
+        return set_action_error(error_out,
+                                "action failed for current layout");
+    }
+
+    return TRUE;
 }
 
 static void
@@ -515,19 +620,19 @@ app_actions_handle(const char *action)
     } else if (strcmp(action, "pane.focus.left") == 0) {
         Workspace *ws = workspace_get_current();
         if (ws)
-            workspace_navigate_pane(ws, -1, 0);
+            focus_direction_for_layout(ws, -1, 0, action);
     } else if (strcmp(action, "pane.focus.right") == 0) {
         Workspace *ws = workspace_get_current();
         if (ws)
-            workspace_navigate_pane(ws, 1, 0);
+            focus_direction_for_layout(ws, 1, 0, action);
     } else if (strcmp(action, "pane.focus.up") == 0) {
         Workspace *ws = workspace_get_current();
         if (ws)
-            workspace_navigate_pane(ws, 0, -1);
+            focus_direction_for_layout(ws, 0, -1, action);
     } else if (strcmp(action, "pane.focus.down") == 0) {
         Workspace *ws = workspace_get_current();
         if (ws)
-            workspace_navigate_pane(ws, 0, 1);
+            focus_direction_for_layout(ws, 0, 1, action);
     } else if (strcmp(action, "browser.toggle") == 0) {
         gboolean vis = gtk_widget_get_visible(ui.browser_notebook);
         gtk_widget_set_visible(ui.browser_notebook, !vis);
@@ -574,11 +679,11 @@ app_actions_handle(const char *action)
     } else if (strcmp(action, "split.horizontal") == 0) {
         Workspace *ws = workspace_get_current();
         if (ws)
-            workspace_split_pane(ws, GTK_ORIENTATION_HORIZONTAL, g_ghostty_app);
+            split_current_for_layout_action(ws, GTK_ORIENTATION_HORIZONTAL, action);
     } else if (strcmp(action, "split.vertical") == 0) {
         Workspace *ws = workspace_get_current();
         if (ws)
-            workspace_split_pane(ws, GTK_ORIENTATION_VERTICAL, g_ghostty_app);
+            split_current_for_layout_action(ws, GTK_ORIENTATION_VERTICAL, action);
     } else if (strcmp(action, "window.fullscreen") == 0) {
         if (gtk_window_is_fullscreen(g_main_window))
             gtk_window_unfullscreen(g_main_window);
@@ -595,7 +700,7 @@ app_actions_handle(const char *action)
     } else if (strcmp(action, "pane.zoom") == 0) {
         Workspace *ws = workspace_get_current();
         if (ws)
-            workspace_toggle_zoom(ws);
+            workspace_layout_toggle_zoom_current(ws);
     } else if (strcmp(action, "notes.toggle") == 0) {
         Workspace *ws = workspace_get_current();
         if (ws && ui.terminal_box)
@@ -695,6 +800,98 @@ app_actions_handle(const char *action)
 }
 
 gboolean
+app_actions_handle_for_socket(const char *action,
+                              gboolean non_interactive,
+                              const char **error_out)
+{
+    Workspace *ws;
+
+    if (error_out)
+        *error_out = NULL;
+    if (!action || !action[0])
+        return set_action_error(error_out, "missing action name");
+
+    if (strcmp(action, "pane.focus.left") == 0) {
+        ws = workspace_get_current();
+        if (!focus_direction_for_layout_with_error(ws, -1, 0, action, error_out))
+            return set_default_action_error(error_out, "failed to focus pane");
+        session_queue_save();
+        return TRUE;
+    }
+    if (strcmp(action, "pane.focus.right") == 0) {
+        ws = workspace_get_current();
+        if (!focus_direction_for_layout_with_error(ws, 1, 0, action, error_out))
+            return set_default_action_error(error_out, "failed to focus pane");
+        session_queue_save();
+        return TRUE;
+    }
+    if (strcmp(action, "pane.focus.up") == 0) {
+        ws = workspace_get_current();
+        if (!focus_direction_for_layout_with_error(ws, 0, -1, action, error_out))
+            return set_default_action_error(error_out, "failed to focus pane");
+        session_queue_save();
+        return TRUE;
+    }
+    if (strcmp(action, "pane.focus.down") == 0) {
+        ws = workspace_get_current();
+        if (!focus_direction_for_layout_with_error(ws, 0, 1, action, error_out))
+            return set_default_action_error(error_out, "failed to focus pane");
+        session_queue_save();
+        return TRUE;
+    }
+
+    if (strcmp(action, "split.horizontal") == 0) {
+        ws = workspace_get_current();
+        if (!split_current_for_layout_action_with_error(
+                ws, GTK_ORIENTATION_HORIZONTAL, action, error_out)) {
+            return set_default_action_error(error_out,
+                                            "failed to split current pane");
+        }
+        session_queue_save();
+        return TRUE;
+    }
+    if (strcmp(action, "split.vertical") == 0) {
+        ws = workspace_get_current();
+        if (!split_current_for_layout_action_with_error(
+                ws, GTK_ORIENTATION_VERTICAL, action, error_out)) {
+            return set_default_action_error(error_out,
+                                            "failed to split current pane");
+        }
+        session_queue_save();
+        return TRUE;
+    }
+
+    if (strcmp(action, "pane.close") == 0) {
+        ws = workspace_get_current();
+        if (!ws)
+            return set_action_error(error_out, "no active workspace");
+
+        if (non_interactive &&
+            workspace_get_layout_mode(ws) == WORKSPACE_LAYOUT_STRIP) {
+            if (!workspace_close_current_for_layout(ws)) {
+                return set_action_error(error_out,
+                                        "failed to close active strip column");
+            }
+            session_queue_save();
+            return TRUE;
+        }
+
+        if (non_interactive) {
+            return set_action_error(
+                error_out,
+                "pane.close requires interactive confirmation outside strip layout");
+        }
+
+        request_close_current_pane(ws);
+        session_queue_save();
+        return TRUE;
+    }
+
+    app_actions_handle(action);
+    return TRUE;
+}
+
+gboolean
 app_actions_on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
                            guint keycode, GdkModifierType state,
                            gpointer user_data)
@@ -717,19 +914,10 @@ app_actions_on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         (mods == GDK_CONTROL_MASK ||
          mods == (GDK_CONTROL_MASK | GDK_SHIFT_MASK))) {
         Workspace *ws = workspace_get_current();
-        if (ws) {
-            GtkNotebook *nb = workspace_get_focused_pane(ws);
-            if (nb) {
-                int n = gtk_notebook_get_n_pages(nb);
-                if (n > 1) {
-                    int cur = gtk_notebook_get_current_page(nb);
-                    int next = (mods & GDK_SHIFT_MASK)
-                        ? (cur - 1 + n) % n
-                        : (cur + 1) % n;
-                    gtk_notebook_set_current_page(nb, next);
-                }
-            }
-        }
+        if (ws && (mods & GDK_SHIFT_MASK))
+            workspace_focus_prev_for_layout(ws);
+        else if (ws)
+            workspace_focus_next_for_layout(ws);
         return TRUE;
     }
 

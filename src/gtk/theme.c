@@ -177,8 +177,30 @@ theme_apply(void)
     char *css = g_strdup_printf(
         "window { background-color: %s; color: %s; }"
         ".sidebar { background-color: %s; }"
-        ".sidebar-row { padding: 8px 12px; border-bottom: 1px solid %s; }"
-        ".sidebar-row:selected { background-color: %s; }"
+        ".sidebar-row { padding: 6px 8px; margin: 2px 6px; border-radius: 6px;"
+        "  transition: background-color 150ms ease, box-shadow 170ms ease; }"
+        ".sidebar-row:hover { background-color: alpha(%s, 0.12);"
+        "  box-shadow: 0 4px 14px alpha(black, 0.14); }"
+        ".sidebar-row:selected { background-color: %s; border-radius: 6px;"
+        "  box-shadow: inset 0 0 0 1px alpha(%s, 0.55); }"
+        ".sidebar-card { padding: 3px 0; }"
+        ".sidebar-card-title { font-weight: bold; font-size: 0.95em; }"
+        ".sidebar-card-details { margin-top: 1px; margin-start: 30px; }"
+        ".sidebar-meta, .sidebar-branch-cwd {"
+        "  font-size: 0.78em; color: %s; margin-top: 2px;"
+        "}"
+        ".sidebar-status { font-size: 0.72em; color: %s; margin-top: 1px;"
+        "  font-family: monospace; }"
+        ".sidebar-status-section { margin-top: 1px; }"
+        ".sidebar-status-entry { margin-top: 0; }"
+        ".sidebar-notification-preview { margin-top: 2px; font-style: italic; }"
+        ".sidebar-aux-row { margin-top: 1px; }"
+        ".sidebar-ports, .sidebar-structure-indicator, .sidebar-progress {"
+        "  font-size: 0.7em;"
+        "  margin-top: 1px;"
+        "}"
+        ".sidebar-progress { font-family: monospace; }"
+        ".sidebar-badge { color: %s; font-size: 0.65em; margin-start: 4px; }"
         ".browser-bar { background-color: %s; border-bottom: 1px solid %s; padding: 4px; }"
         ".browser-bar button { background: %s; color: %s; border: none; padding: 2px 8px;"
         "  border-radius: 4px; min-width: 24px; min-height: 24px; }"
@@ -256,6 +278,8 @@ theme_apply(void)
         t->surface,
         t->overlay,
         t->highlight,
+        t->accent,
+        t->subtext, t->muted, t->green,
         t->surface, t->overlay,
         t->muted, t->fg,
         t->bg, t->fg, t->overlay,

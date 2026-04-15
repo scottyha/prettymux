@@ -3,6 +3,7 @@
 #include <glib.h>
 
 #include "theme.h"
+#include "workspace_layout.h"
 
 void app_settings_load(void);
 void app_settings_save(void);
@@ -21,6 +22,8 @@ gboolean app_settings_get_focus_on_hover(void);
 void app_settings_set_focus_on_hover(gboolean enabled);
 gboolean app_settings_get_open_links_in_browser(void);
 void app_settings_set_open_links_in_browser(gboolean enabled);
+WorkspaceLayoutMode app_settings_get_default_layout_mode(void);
+void app_settings_set_default_layout_mode(WorkspaceLayoutMode mode);
 
 const char *app_settings_get_gtk_renderer_mode(void);
 void app_settings_set_gtk_renderer_mode(const char *mode);

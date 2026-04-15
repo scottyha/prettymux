@@ -28,3 +28,22 @@ socket_server_get_path(void)
 {
     return NULL;
 }
+
+const char *
+socket_server_get_instance_socket_path(void)
+{
+    return NULL;
+}
+
+gboolean
+socket_server_route_command_to_instance(const char *instance_id,
+                                        JsonObject *msg,
+                                        JsonBuilder *response,
+                                        GError **error)
+{
+    (void)instance_id;
+    (void)msg;
+    (void)response;
+    (void)error;
+    return FALSE;
+}

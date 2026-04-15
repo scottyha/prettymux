@@ -10,6 +10,11 @@ RUN apt-get update \
         curl \
         g++ \
         git \
+        jq \
+        libegl1 \
+        libgbm1 \
+        libgl1-mesa-dri \
+        libgles2 \
         libadwaita-1-dev \
         libgtk-4-dev \
         libjson-glib-dev \
@@ -17,6 +22,7 @@ RUN apt-get update \
         meson \
         ninja-build \
         pkg-config \
+        weston \
         xz-utils \
     && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
         | tar -xJ -C /opt \

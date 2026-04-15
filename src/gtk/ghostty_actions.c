@@ -342,6 +342,7 @@ action_idle_handler(gpointer user_data)
 
             ghostty_terminal_set_progress(loc.terminal, state, pct);
             workspace_refresh_tab_labels(loc.workspace);
+            workspace_refresh_sidebar_label(loc.workspace);
         }
         break;
     }

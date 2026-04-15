@@ -2,12 +2,16 @@
 
 #include <gtk/gtk.h>
 
+typedef struct _Workspace Workspace;
+typedef struct workspace_status_entry workspace_status_entry;
+
 void notifications_init(void);
 void notifications_add_full(const char *msg, int ws_idx,
                             GtkNotebook *pane, int tab_idx);
 void notifications_clear(void);
 guint notifications_count(void);
 void bell_button_update(void);
+void notifications_on_workspace_removed(int removed_ws_idx);
 void notifications_apply_toast_position_setting(void);
 gboolean notification_target_is_active(int ws_idx,
                                        GtkNotebook *pane_notebook,
@@ -26,5 +30,8 @@ void sidebar_toast_show_internal(const char *msg, int ws_idx,
                                  gboolean copy_style,
                                  gboolean recording_marker,
                                  guint timeout_ms);
+void notifications_publish_workspace_status(Workspace *ws,
+                                            const workspace_status_entry *entry,
+                                            gboolean allow_toast);
 void notifications_on_bell_button_clicked(GtkButton *btn, gpointer user_data);
 void build_toast_overlay(void);

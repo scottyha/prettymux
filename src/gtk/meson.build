@@ -35,6 +35,8 @@ sources = files(
   'shortcuts.c',
   'settings_dialog.c',
   'workspace.c',
+  'workspace_layout.c',
+  'workspace_strip.c',
   'session.c',
   'project_icon_cache.c',
   'close_confirm.c',
@@ -48,6 +50,8 @@ sources = files(
   'notifications.c',
   'socket_commands.c',
   'terminal_routing.c',
+  'sidebar_data.c',
+  'sidebar_sections.c',
   'sidebar_ui.c',
   'shortcuts_overlay.c',
   'pane_move_overlay.c',
@@ -201,3 +205,95 @@ prettymux_icon = configure_file(
 install_data(prettymux_desktop, install_dir: get_option('datadir') / 'applications')
 install_data(prettymux_desktop_gnome, install_dir: get_option('datadir') / 'applications')
 install_data(prettymux_icon, install_dir: get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps')
+
+# --- Tests ---
+glib = dependency('glib-2.0')
+
+test_sidebar_data = executable('test_sidebar_data',
+  files('test_sidebar_data.c', 'sidebar_data.c'),
+  dependencies: [glib],
+)
+test('sidebar-data', test_sidebar_data)
+
+test_sidebar_ui_sections = executable('test_sidebar_ui_sections',
+  files('test_sidebar_ui_sections.c', 'sidebar_ui.c', 'sidebar_sections.c'),
+  dependencies: [gtk4, glib],
+  include_directories: extra_include_dirs,
+)
+test('sidebar-ui-sections', test_sidebar_ui_sections)
+
+test_workspace_layout = executable('test_workspace_layout',
+  files('test_workspace_layout.c', 'workspace_layout.c'),
+  dependencies: [gtk4],
+  include_directories: extra_include_dirs,
+)
+test('workspace-layout', test_workspace_layout)
+
+test_workspace_strip = executable('test_workspace_strip',
+  files('test_workspace_strip.c', 'workspace_strip.c', 'workspace_layout.c'),
+  dependencies: [gtk4],
+  include_directories: extra_include_dirs,
+)
+test('workspace-strip', test_workspace_strip)
+
+test_session_strip_persistence = executable('test_session_strip_persistence',
+  files('test_session_strip_persistence.c', 'session.c'),
+  dependencies: [gtk4, json_glib],
+  include_directories: extra_include_dirs,
+  c_args: ['-ffunction-sections', '-fdata-sections'],
+  link_args: ['-Wl,--gc-sections'],
+)
+test('session-strip-persistence', test_session_strip_persistence)
+
+test_app_settings_layout_mode = executable('test_app_settings_layout_mode',
+  files('test_app_settings_layout_mode.c', 'app_settings.c'),
+  dependencies: [glib, gtk4],
+)
+test('app-settings-layout-mode', test_app_settings_layout_mode)
+
+test_app_state_instance = executable('test_app_state_instance',
+  files('test_app_state_instance.c', 'app_state.c'),
+  dependencies: [glib, gtk4],
+  include_directories: extra_include_dirs,
+)
+test('app-state-instance', test_app_state_instance)
+
+if is_linux
+  test_workspace_phase4_actions = executable('test_workspace_phase4_actions',
+    files('test_workspace_phase4_actions.c',
+          'workspace.c',
+          'workspace_layout.c',
+          'workspace_strip.c'),
+    dependencies: [gtk4, adw, json_glib],
+    include_directories: extra_include_dirs,
+    c_args: ['-ffunction-sections', '-fdata-sections'],
+    link_args: ['-Wl,--gc-sections'],
+  )
+  test('workspace-phase4-actions', test_workspace_phase4_actions)
+
+  test_socket_server_route = executable('test_socket_server_route',
+    files('test_socket_server_route.c', 'socket_server.c', 'app_state.c'),
+    dependencies: [gtk4, json_glib],
+    include_directories: extra_include_dirs,
+  )
+  test('socket-server-route', test_socket_server_route)
+
+  test_prettymux_open_instance = executable('test_prettymux_open_instance',
+    files('test_prettymux_open_instance.c'),
+    dependencies: [glib],
+  )
+  test('prettymux-open-instance', test_prettymux_open_instance)
+
+  test_socket_commands_status = executable('test_socket_commands_status',
+    files('test_socket_commands_status.c', 'socket_commands.c', 'app_state.c'),
+    dependencies: [gtk4, json_glib],
+    include_directories: extra_include_dirs,
+  )
+  test('socket-commands-status', test_socket_commands_status)
+
+  test_prettymux_agent_cli_instance = executable('test_prettymux_agent_cli_instance',
+    files('test_prettymux_agent_cli_instance.c'),
+    dependencies: [glib, json_glib],
+  )
+  test('prettymux-agent-cli-instance', test_prettymux_agent_cli_instance)
+endif

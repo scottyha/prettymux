@@ -4,7 +4,9 @@
 
 #include "pane_move_overlay.h"
 
+#include "app_state.h"
 #include "ghostty_terminal.h"
+#include "notifications.h"
 #include "project_icon_cache.h"
 #include "theme.h"
 #include "workspace.h"
@@ -22,11 +24,24 @@ typedef struct {
     gboolean valid;
 } SourceTabLocation;
 
+typedef enum {
+    PANE_MOVE_TARGET_PANE = 0,
+    PANE_MOVE_TARGET_INSTANCE,
+} PaneMoveTargetType;
+
+typedef enum {
+    PANE_MOVE_SCOPE_TAB = 0,
+    PANE_MOVE_SCOPE_WORKSPACE,
+} PaneMoveScope;
+
 typedef struct {
+    PaneMoveTargetType target_type;
     char *title;
     char *detail;
-    char *pane_label;
+    char *badge_label;
+    char *target_label;
     char *icon_path;
+    char *instance_id;
     int workspace_idx;
     int pane_idx;
 } PaneMoveItem;
@@ -42,6 +57,8 @@ typedef struct {
     GtkWidget *workspace_list;
     GPtrArray *items;
     SourceTabLocation source;
+    PaneMoveScope scope;
+    int source_workspace_idx;
 } PaneMoveOverlayState;
 
 static gboolean css_injected = FALSE;
@@ -88,8 +105,10 @@ pane_move_item_free(gpointer data)
 
     g_free(item->title);
     g_free(item->detail);
-    g_free(item->pane_label);
+    g_free(item->badge_label);
+    g_free(item->target_label);
     g_free(item->icon_path);
+    g_free(item->instance_id);
     g_free(item);
 }
 
@@ -104,10 +123,18 @@ pane_move_state_free(gpointer data)
 }
 
 static gboolean
+workspace_index_valid(int ws_idx)
+{
+    return workspaces && ws_idx >= 0 && ws_idx < (int)workspaces->len;
+}
+
+static gboolean
 str_contains_ci(const char *haystack, const char *needle)
 {
-    if (!haystack || !needle || !*needle)
+    if (!needle || !*needle)
         return TRUE;
+    if (!haystack || !*haystack)
+        return FALSE;
 
     size_t hlen = strlen(haystack);
     size_t nlen = strlen(needle);
@@ -374,12 +401,8 @@ terminal_summary(GtkWidget *terminal, Workspace *ws)
 }
 
 static void
-gather_items(PaneMoveOverlayState *state)
+gather_pane_items(PaneMoveOverlayState *state)
 {
-    if (state->items)
-        g_ptr_array_unref(state->items);
-    state->items = g_ptr_array_new_with_free_func(pane_move_item_free);
-
     if (!state->source.valid || !workspaces)
         return;
 
@@ -414,13 +437,14 @@ gather_items(PaneMoveOverlayState *state)
             summary = terminal_summary(terminal, ws);
 
             item = g_new0(PaneMoveItem, 1);
+            item->target_type = PANE_MOVE_TARGET_PANE;
             item->workspace_idx = (int)wi;
             item->pane_idx = (int)pi;
-            item->title = g_strdup((ws->name && ws->name[0]) ? ws->name
-                                                             : "Workspace");
-            item->pane_label = g_strdup_printf("Pane %d", (int)pi + 1);
+            item->title = g_strdup(ws->name[0] ? ws->name : "Workspace");
+            item->badge_label = g_strdup("TAB");
+            item->target_label = g_strdup_printf("Pane %d", (int)pi + 1);
             item->detail = g_strdup_printf("%s  •  %d tab%s%s%s",
-                                           item->pane_label,
+                                           item->target_label,
                                            n_pages,
                                            n_pages == 1 ? "" : "s",
                                            (summary && summary[0]) ? "  •  " : "",
@@ -431,17 +455,107 @@ gather_items(PaneMoveOverlayState *state)
     }
 }
 
+static const char *
+source_workspace_name(const PaneMoveOverlayState *state)
+{
+    Workspace *ws;
+
+    if (!state || !workspace_index_valid(state->source_workspace_idx))
+        return "Current Workspace";
+
+    ws = g_ptr_array_index(workspaces, state->source_workspace_idx);
+    if (!ws || !ws->name[0])
+        return "Current Workspace";
+
+    return ws->name;
+}
+
+static void
+gather_instance_items(PaneMoveOverlayState *state)
+{
+    g_autoptr(GPtrArray) instances = NULL;
+    const char *current_instance_id;
+
+    if (!state)
+        return;
+
+    instances = app_state_list_instances();
+    if (!instances)
+        return;
+
+    current_instance_id = app_state_get_instance_id();
+    for (guint i = 0; i < instances->len; i++) {
+        const char *instance_id = g_ptr_array_index(instances, i);
+        PaneMoveItem *item;
+
+        if (!instance_id || !instance_id[0])
+            continue;
+        if (g_strcmp0(instance_id, current_instance_id) == 0)
+            continue;
+
+        item = g_new0(PaneMoveItem, 1);
+        item->target_type = PANE_MOVE_TARGET_INSTANCE;
+        item->title = g_strdup_printf("Window %s", instance_id);
+        item->badge_label = g_strdup("WORK");
+        item->target_label = g_strdup("Window");
+        item->detail = g_strdup_printf("Move workspace \"%s\" to instance %s",
+                                       source_workspace_name(state),
+                                       instance_id);
+        item->instance_id = g_strdup(instance_id);
+        item->workspace_idx = -1;
+        item->pane_idx = -1;
+        g_ptr_array_add(state->items, item);
+    }
+}
+
+static void
+gather_items(PaneMoveOverlayState *state)
+{
+    if (!state)
+        return;
+
+    if (state->items)
+        g_ptr_array_unref(state->items);
+    state->items = g_ptr_array_new_with_free_func(pane_move_item_free);
+
+    if (state->scope == PANE_MOVE_SCOPE_TAB) {
+        gather_pane_items(state);
+        return;
+    }
+
+    gather_instance_items(state);
+}
+
+static gboolean
+item_matches_query(const PaneMoveItem *item, const char *query)
+{
+    if (!item)
+        return FALSE;
+    if (!query || !query[0])
+        return TRUE;
+
+    if (str_contains_ci(item->title, query) ||
+        str_contains_ci(item->detail, query) ||
+        str_contains_ci(item->target_label, query))
+        return TRUE;
+
+    return item->target_type == PANE_MOVE_TARGET_INSTANCE &&
+           str_contains_ci(item->instance_id, query);
+}
+
 static GtkWidget *
 create_row_widget(PaneMoveItem *item)
 {
     GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
     GtkWidget *icon_box = NULL;
     GtkWidget *icon = NULL;
-    GtkWidget *badge = gtk_label_new("MOVE");
+    GtkWidget *badge = gtk_label_new(item->badge_label ? item->badge_label
+                                                       : "MOVE");
     GtkWidget *text_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
     GtkWidget *name = gtk_label_new(item->title);
     GtkWidget *detail = gtk_label_new(item->detail);
-    GtkWidget *pill = gtk_label_new(item->pane_label);
+    GtkWidget *pill = gtk_label_new(item->target_label ? item->target_label
+                                                       : "");
 
     gtk_widget_add_css_class(hbox, "pane-move-row");
     gtk_widget_add_css_class(badge, "pane-move-badge");
@@ -493,9 +607,7 @@ populate_rows(PaneMoveOverlayState *state, const char *query)
         GtkWidget *row_widget;
         GtkListBoxRow *row;
 
-        if (query && *query &&
-            !str_contains_ci(item->title, query) &&
-            !str_contains_ci(item->detail, query))
+        if (!item_matches_query(item, query))
             continue;
 
         row_widget = create_row_widget(item);
@@ -515,11 +627,16 @@ populate_rows(PaneMoveOverlayState *state, const char *query)
             gtk_list_box_select_row(GTK_LIST_BOX(state->list_box), first);
     } else {
         if (state->items->len == 0) {
-            gtk_label_set_text(GTK_LABEL(state->empty_label),
-                "No other panes available yet. Split a pane or create another workspace.");
+            if (state->scope == PANE_MOVE_SCOPE_WORKSPACE) {
+                gtk_label_set_text(GTK_LABEL(state->empty_label),
+                    "No other windows are running yet.");
+            } else {
+                gtk_label_set_text(GTK_LABEL(state->empty_label),
+                    "No move targets available yet. Open another pane, workspace, or window.");
+            }
         } else {
             gtk_label_set_text(GTK_LABEL(state->empty_label),
-                "No panes match that search.");
+                "No move targets match that search.");
         }
         gtk_widget_set_visible(state->list_box, FALSE);
         gtk_widget_set_visible(state->empty_label, TRUE);
@@ -540,22 +657,55 @@ activate_row(PaneMoveOverlayState *state, GtkListBoxRow *row)
 {
     PaneMoveItem *item;
 
-    if (!state || !row || !state->source.valid)
+    if (!state || !row)
         return;
 
     item = g_object_get_data(G_OBJECT(row), "pane-move-item");
     if (!item)
         return;
 
-    if (workspace_move_tab(state->source.workspace_idx,
-                           state->source.pane_idx,
-                           state->source.tab_idx,
-                           item->workspace_idx,
-                           item->pane_idx)) {
-        workspace_switch(item->workspace_idx,
-                         state->terminal_stack,
-                         state->workspace_list);
-        close_overlay(state);
+    if (item->target_type == PANE_MOVE_TARGET_PANE) {
+        if (!state->source.valid)
+            return;
+        if (workspace_move_tab(state->source.workspace_idx,
+                               state->source.pane_idx,
+                               state->source.tab_idx,
+                               item->workspace_idx,
+                               item->pane_idx)) {
+            workspace_switch(item->workspace_idx,
+                             state->terminal_stack,
+                             state->workspace_list);
+            close_overlay(state);
+        }
+        return;
+    }
+
+    if (item->target_type == PANE_MOVE_TARGET_INSTANCE &&
+        item->instance_id && item->instance_id[0] &&
+        workspace_index_valid(state->source_workspace_idx)) {
+        int target_workspace_idx = -1;
+        g_autofree char *move_error = NULL;
+        int toast_ws_idx = workspace_index_valid(state->source_workspace_idx)
+            ? state->source_workspace_idx
+            : current_workspace;
+
+        if (state->scope != PANE_MOVE_SCOPE_WORKSPACE)
+            return;
+
+        if (workspace_move_to_instance(state->source_workspace_idx,
+                                       item->instance_id,
+                                       &target_workspace_idx,
+                                       &move_error)) {
+            close_overlay(state);
+            return;
+        }
+
+        sidebar_toast_show((move_error && move_error[0])
+                               ? move_error
+                               : "Failed to move workspace to selected window.",
+                           toast_ws_idx,
+                           NULL,
+                           -1);
     }
 }
 
@@ -650,10 +800,12 @@ on_cancel_clicked(GtkButton *button, gpointer user_data)
     close_overlay(user_data);
 }
 
-void
-pane_move_overlay_toggle(GtkOverlay *overlay,
-                         GtkWidget *terminal_stack,
-                         GtkWidget *workspace_list)
+static void
+pane_move_overlay_toggle_with_scope(GtkOverlay *overlay,
+                                    GtkWidget *terminal_stack,
+                                    GtkWidget *workspace_list,
+                                    PaneMoveScope scope,
+                                    int source_workspace_idx)
 {
     PaneMoveOverlayState *state;
     GtkWidget *existing;
@@ -682,7 +834,18 @@ pane_move_overlay_toggle(GtkOverlay *overlay,
     state->overlay = overlay;
     state->terminal_stack = terminal_stack;
     state->workspace_list = workspace_list;
+    state->scope = scope;
     locate_current_tab(&state->source);
+
+    if (workspace_index_valid(source_workspace_idx)) {
+        state->source_workspace_idx = source_workspace_idx;
+    } else if (state->source.valid) {
+        state->source_workspace_idx = state->source.workspace_idx;
+    } else if (workspace_index_valid(current_workspace)) {
+        state->source_workspace_idx = current_workspace;
+    } else {
+        state->source_workspace_idx = -1;
+    }
 
     state->backdrop = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_name(state->backdrop, OVERLAY_NAME);
@@ -705,17 +868,23 @@ pane_move_overlay_toggle(GtkOverlay *overlay,
     gtk_widget_set_margin_bottom(header, 4);
     gtk_box_append(GTK_BOX(state->card), header);
 
-    kicker = gtk_label_new("TAB FLOW");
+    kicker = gtk_label_new(scope == PANE_MOVE_SCOPE_WORKSPACE
+                               ? "WORKSPACE FLOW"
+                               : "TAB FLOW");
     gtk_widget_add_css_class(kicker, "pane-move-kicker");
     gtk_label_set_xalign(GTK_LABEL(kicker), 0);
     gtk_box_append(GTK_BOX(header), kicker);
 
-    title = gtk_label_new("Move Current Tab");
+    title = gtk_label_new(scope == PANE_MOVE_SCOPE_WORKSPACE
+                              ? "Move Workspace"
+                              : "Move Current Tab");
     gtk_widget_add_css_class(title, "pane-move-title");
     gtk_label_set_xalign(GTK_LABEL(title), 0);
     gtk_box_append(GTK_BOX(header), title);
 
-    subtitle = gtk_label_new("Choose any destination pane across your workspaces.");
+    subtitle = gtk_label_new(scope == PANE_MOVE_SCOPE_WORKSPACE
+                                 ? "Choose a destination window/instance."
+                                 : "Choose a destination pane.");
     gtk_widget_add_css_class(subtitle, "pane-move-subtitle");
     gtk_label_set_xalign(GTK_LABEL(subtitle), 0);
     gtk_box_append(GTK_BOX(header), subtitle);
@@ -780,4 +949,24 @@ pane_move_overlay_toggle(GtkOverlay *overlay,
     gtk_overlay_add_overlay(overlay, state->backdrop);
     gtk_widget_set_visible(state->backdrop, TRUE);
     gtk_widget_grab_focus(search);
+}
+
+void
+pane_move_overlay_toggle(GtkOverlay *overlay,
+                         GtkWidget *terminal_stack,
+                         GtkWidget *workspace_list)
+{
+    pane_move_overlay_toggle_with_scope(overlay, terminal_stack, workspace_list,
+                                        PANE_MOVE_SCOPE_TAB, -1);
+}
+
+void
+pane_move_overlay_toggle_workspace_targets(GtkOverlay *overlay,
+                                           GtkWidget *terminal_stack,
+                                           GtkWidget *workspace_list,
+                                           int source_workspace_idx)
+{
+    pane_move_overlay_toggle_with_scope(overlay, terminal_stack, workspace_list,
+                                        PANE_MOVE_SCOPE_WORKSPACE,
+                                        source_workspace_idx);
 }

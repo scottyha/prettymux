@@ -16,6 +16,7 @@ typedef struct {
     GtkWidget *toast_position_dropdown;
     GtkWidget *focus_on_hover_switch;
     GtkWidget *open_links_in_browser_switch;
+    GtkWidget *layout_mode_dropdown;
     GtkWidget *gtk_renderer_dropdown;
     GtkWidget *font_spin;
     GtkWidget *tab_height_spin;
@@ -440,8 +441,10 @@ on_apply_clicked(GtkButton *button, gpointer user_data)
     SettingsDialogState *state = user_data;
     guint selected;
     guint toast_position_selected;
+    guint layout_mode_selected;
     guint renderer_selected;
     const char *renderer_mode;
+    WorkspaceLayoutMode default_layout_mode;
     const Theme *selected_theme;
     Theme custom_theme;
     GtkWindow *dialog;
@@ -470,6 +473,12 @@ on_apply_clicked(GtkButton *button, gpointer user_data)
         gtk_switch_get_active(GTK_SWITCH(state->focus_on_hover_switch)));
     app_settings_set_open_links_in_browser(
         gtk_switch_get_active(GTK_SWITCH(state->open_links_in_browser_switch)));
+    layout_mode_selected =
+        gtk_drop_down_get_selected(GTK_DROP_DOWN(state->layout_mode_dropdown));
+    default_layout_mode = layout_mode_selected == 1
+        ? WORKSPACE_LAYOUT_STRIP
+        : WORKSPACE_LAYOUT_CLASSIC;
+    app_settings_set_default_layout_mode(default_layout_mode);
     renderer_selected =
         gtk_drop_down_get_selected(GTK_DROP_DOWN(state->gtk_renderer_dropdown));
     renderer_mode = renderer_selected == 1 ? "vulkan"
@@ -506,12 +515,20 @@ settings_dialog_present(GtkWindow *parent,
 {
     static const char *theme_names[] = {"Dark", "Light", "Monokai", "Custom", NULL};
     static const char *toast_positions[] = {"Top", "Bottom", NULL};
+    static const char *layout_mode_options[] = {
+        "Classic (split panes)",
+        "Strip (horizontal columns)",
+        NULL
+    };
     static const char *gtk_renderer_modes[] = {"Auto (prefer Vulkan)", "Vulkan", "OpenGL", "NGL", NULL};
     const Theme *custom_theme = app_settings_get_custom_theme();
     const Theme *current_theme = theme_get_current();
     const char *toast_position = app_settings_get_toast_position();
+    WorkspaceLayoutMode default_layout_mode =
+        app_settings_get_default_layout_mode();
     const char *renderer_mode = app_settings_get_gtk_renderer_mode();
     guint current_theme_index = 0;
+    guint layout_mode_index = 0;
     guint renderer_mode_index = 0;
     SettingsDialogState *state = g_new0(SettingsDialogState, 1);
     GtkWindow *dialog = GTK_WINDOW(gtk_window_new());
@@ -552,6 +569,8 @@ settings_dialog_present(GtkWindow *parent,
         renderer_mode_index = 2;
     else if (g_strcmp0(renderer_mode, "ngl") == 0)
         renderer_mode_index = 3;
+    if (default_layout_mode == WORKSPACE_LAYOUT_STRIP)
+        layout_mode_index = 1;
 
     gtk_window_set_title(dialog, "Settings");
     gtk_window_set_transient_for(dialog, parent);
@@ -664,6 +683,18 @@ settings_dialog_present(GtkWindow *parent,
     gtk_box_append(GTK_BOX(content),
                    settings_row("GTK renderer",
                                 state->gtk_renderer_dropdown));
+
+    gtk_box_append(GTK_BOX(content),
+                   settings_section_title("Workspace defaults",
+                                          "Choose how new workspaces start. Classic keeps the existing split-pane layout. Strip uses horizontal columns."));
+
+    state->layout_mode_dropdown =
+        gtk_drop_down_new_from_strings(layout_mode_options);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(state->layout_mode_dropdown),
+                               layout_mode_index);
+    gtk_box_append(GTK_BOX(content),
+                   settings_row("Default layout mode",
+                                state->layout_mode_dropdown));
 
     gtk_box_append(GTK_BOX(content),
                    settings_section_title("PrettyMux theme",

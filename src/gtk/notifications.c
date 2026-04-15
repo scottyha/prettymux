@@ -58,6 +58,43 @@ notifications_init(void)
         g_notifications = g_ptr_array_new_with_free_func(notification_entry_free);
 }
 
+static gboolean
+notifications_resolve_workspace_target(Workspace *ws,
+                                       int *out_ws_idx,
+                                       GtkNotebook **out_pane,
+                                       int *out_tab_idx,
+                                       int *out_pane_idx)
+{
+    GtkNotebook *pane = NULL;
+    int tab_idx = -1;
+    int ws_idx;
+
+    if (!ws)
+        return FALSE;
+
+    ws_idx = workspace_get_index(ws);
+    if (ws_idx < 0)
+        return FALSE;
+
+    pane = workspace_get_focused_pane(ws);
+    if (!pane && ws->pane_notebooks && ws->pane_notebooks->len > 0)
+        pane = g_ptr_array_index(ws->pane_notebooks, 0);
+
+    if (pane && GTK_IS_NOTEBOOK(pane))
+        tab_idx = gtk_notebook_get_current_page(pane);
+
+    if (out_ws_idx)
+        *out_ws_idx = ws_idx;
+    if (out_pane)
+        *out_pane = pane;
+    if (out_tab_idx)
+        *out_tab_idx = tab_idx;
+    if (out_pane_idx)
+        *out_pane_idx = (pane && ws) ? workspace_get_pane_index(ws, pane) : -1;
+
+    return TRUE;
+}
+
 void
 notifications_add_full(const char *msg, int ws_idx, GtkNotebook *pane, int tab_idx)
 {
@@ -72,6 +109,21 @@ notifications_add_full(const char *msg, int ws_idx, GtkNotebook *pane, int tab_i
     g_ptr_array_add(g_notifications, e);
     while (g_notifications->len > 50)
         g_ptr_array_remove_index(g_notifications, 0);
+
+    if (msg && msg[0] && workspaces && ws_idx >= 0 &&
+        ws_idx < (int)workspaces->len) {
+        Workspace *ws = g_ptr_array_index(workspaces, ws_idx);
+        workspace_status_entry status = {0};
+
+        g_strlcpy(status.entry_id, "notification.recent",
+                  sizeof(status.entry_id));
+        g_strlcpy(status.provider, "prettymux", sizeof(status.provider));
+        g_strlcpy(status.kind, "notification", sizeof(status.kind));
+        g_strlcpy(status.status, "new", sizeof(status.status));
+        g_strlcpy(status.summary, msg, sizeof(status.summary));
+        status.updated_at_usec = g_get_real_time();
+        workspace_set_status_entry(ws, &status);
+    }
 }
 
 void
@@ -87,6 +139,39 @@ notifications_count(void)
     if (!g_notifications)
         return 0;
     return g_notifications->len;
+}
+
+void
+notifications_on_workspace_removed(int removed_ws_idx)
+{
+    if (removed_ws_idx < 0)
+        return;
+
+    if (g_notifications) {
+        for (gint i = (gint)g_notifications->len - 1; i >= 0; i--) {
+            NotificationEntry *entry = g_ptr_array_index(g_notifications, i);
+
+            if (!entry)
+                continue;
+
+            if (entry->workspace_idx == removed_ws_idx) {
+                g_ptr_array_remove_index(g_notifications, (guint)i);
+                continue;
+            }
+
+            if (entry->workspace_idx > removed_ws_idx)
+                entry->workspace_idx--;
+        }
+    }
+
+    if (g_sidebar_toast_action) {
+        if (g_sidebar_toast_action->workspace_idx == removed_ws_idx)
+            sidebar_toast_hide();
+        else if (g_sidebar_toast_action->workspace_idx > removed_ws_idx)
+            g_sidebar_toast_action->workspace_idx--;
+    }
+
+    bell_button_update();
 }
 
 void
@@ -275,6 +360,56 @@ sidebar_toast_show_copy(const char *msg, int ws_idx,
 {
     sidebar_toast_show_internal(msg, ws_idx, pane_notebook, tab_idx,
                                 TRUE, TRUE, FALSE, 2000);
+}
+
+void
+notifications_publish_workspace_status(Workspace *ws,
+                                       const workspace_status_entry *entry,
+                                       gboolean allow_toast)
+{
+    int ws_idx = -1;
+    int tab_idx = -1;
+    int pane_idx = -1;
+    GtkNotebook *pane = NULL;
+    char notif_msg[512];
+    const char *provider;
+    const char *summary;
+
+    if (!ws || !entry)
+        return;
+    if (!notifications_resolve_workspace_target(ws, &ws_idx, &pane, &tab_idx,
+                                                &pane_idx))
+        return;
+
+    provider = entry->provider[0] ? entry->provider : "agent";
+    summary = entry->summary[0]
+        ? entry->summary
+        : (entry->detail[0]
+               ? entry->detail
+               : (entry->status[0] ? entry->status : "status updated"));
+
+    if (entry->status[0] && entry->summary[0] &&
+        g_strcmp0(entry->status, entry->summary) != 0) {
+        g_snprintf(notif_msg, sizeof(notif_msg), "%s %s: %s",
+                   provider, entry->status, entry->summary);
+    } else {
+        g_snprintf(notif_msg, sizeof(notif_msg), "%s: %s", provider, summary);
+    }
+
+    notifications_add_full(notif_msg, ws_idx, pane, tab_idx);
+    bell_button_update();
+    if (pane && tab_idx >= 0)
+        workspace_mark_tab_notification(pane, tab_idx);
+
+    if (notification_target_is_active(ws_idx, pane, tab_idx))
+        return;
+
+    if (g_main_window_active && allow_toast) {
+        sidebar_toast_show(notif_msg, ws_idx, pane, tab_idx);
+        return;
+    }
+
+    send_desktop_notification("PrettyMux", notif_msg, ws_idx, pane_idx, tab_idx);
 }
 
 static void

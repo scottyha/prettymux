@@ -2,11 +2,29 @@
 
 #include <gtk/gtk.h>
 #include "ghostty.h"
+#include "workspace_layout.h"
 
-typedef struct {
+typedef struct _WorkspaceStripState WorkspaceStripState;
+
+typedef struct workspace_status_entry {
+    char entry_id[96];
+    char provider[48];
+    char kind[48];
+    char status[64];
+    char summary[192];
+    char detail[320];
+    gint64 updated_at_usec;
+    gboolean attention;
+} workspace_status_entry;
+
+typedef struct _Workspace {
+    WorkspaceLayoutMode layout_mode;
+    WorkspaceStripState *strip_state;
+    guint64 serial;              /* Stable runtime id for async callbacks */
     char name[64];
     GtkWidget *container;        /* Root widget for this workspace in the stack.
                                   * Always the workspace overlay. */
+    gboolean detached_container_ref; /* True when detach holds a ref for re-attach */
     GtkWidget *overlay;          /* Root overlay: pane tree child + floating terminals */
     GtkWidget *notebook;         /* The *first* terminal tab notebook (kept for
                                   * backwards compat; same as pane_notebooks[0]). */
@@ -15,9 +33,22 @@ typedef struct {
     GtkNotebook *active_pane;    /* Last pane activated by hover/click/focus */
     char cwd[512];
     char git_branch[128];
+    GCancellable *git_branch_cancel;
+    guint64 git_branch_generation;
+    char sidebar_primary_branch[128];
+    GCancellable *primary_branch_cancel;
+    guint64 primary_branch_generation;
     char notification[256];
     gboolean broadcast;
     GtkWidget *sidebar_label;    /* GtkLabel in the sidebar row (for updates) */
+    GtkWidget *sidebar_meta_label;   /* Branch + cwd summary line */
+    GtkWidget *sidebar_status_label; /* Recent notification preview line */
+    GtkWidget *sidebar_status_entries_box; /* Recent structured status lines */
+    GtkWidget *sidebar_ports_label;  /* Compact ports summary line */
+    GtkWidget *sidebar_progress_label; /* Compact progress visualization */
+    GtkWidget *sidebar_structure_label; /* Pane/column count indicator */
+    GtkWidget *sidebar_badge;        /* Attention badge dot */
+    GHashTable *status_entries;      /* entry_id => workspace_status_entry* */
 
     /* Pane zoom state */
     gboolean zoomed;
@@ -25,6 +56,7 @@ typedef struct {
 
     /* Notes panel */
     char *notes_text;            /* Per-workspace notes content (heap-allocated) */
+
 } Workspace;
 
 extern GPtrArray *workspaces;
@@ -35,6 +67,7 @@ extern GtkWidget *g_terminal_stack;
 extern GtkWidget *g_workspace_list;
 
 Workspace *workspace_get_current(void);
+int workspace_get_index(Workspace *ws);
 void workspace_add(GtkWidget *terminal_stack, GtkWidget *workspace_list, ghostty_app_t app);
 void workspace_remove(int index, GtkWidget *terminal_stack, GtkWidget *workspace_list);
 void workspace_switch(int index, GtkWidget *terminal_stack, GtkWidget *workspace_list);
@@ -82,13 +115,19 @@ void        workspace_split_pane(Workspace *ws, GtkOrientation orientation,
 GtkNotebook *workspace_split_pane_target(Workspace *ws, GtkNotebook *pane,
                                          GtkOrientation orientation,
                                          ghostty_app_t app);
+gboolean    workspace_split_current_for_layout(Workspace *ws,
+                                               GtkOrientation orientation,
+                                               ghostty_app_t app);
 void        workspace_close_pane(Workspace *ws, GtkNotebook *pane);
+gboolean    workspace_close_current_for_layout(Workspace *ws);
 GtkNotebook *workspace_get_focused_pane(Workspace *ws);
 GtkNotebook *workspace_get_pane_by_index(Workspace *ws, int pane_idx);
 GtkNotebook *workspace_get_pane_by_id(Workspace *ws, const char *pane_id);
 int         workspace_get_pane_index(Workspace *ws, GtkNotebook *pane);
 const char *workspace_get_pane_id(GtkNotebook *pane);
 gboolean    workspace_focus_pane(Workspace *ws, GtkNotebook *pane);
+gboolean    workspace_focus_next_for_layout(Workspace *ws);
+gboolean    workspace_focus_prev_for_layout(Workspace *ws);
 gboolean    workspace_equalize_splits(Workspace *ws,
                                       const char *orientation_name);
 gboolean    workspace_resize_pane_percent(Workspace *ws,
@@ -144,9 +183,45 @@ void workspace_clear_tab_notification(GtkNotebook *pane, int page_num);
  * Check if any terminal in the workspace has unread activity.
  */
 gboolean workspace_has_activity(Workspace *ws);
+
+/*
+ * Sidebar card data helpers.
+ *
+ * Primary-path rule: CWD and branch come from the first tab of the
+ * first pane.  Falls back to ws->cwd / ws->git_branch only when the
+ * first-pane terminal is unavailable.
+ */
+const char *workspace_get_sidebar_primary_cwd(Workspace *ws);
+const char *workspace_get_sidebar_primary_branch(Workspace *ws);
+char       *workspace_get_sidebar_status_summary(Workspace *ws);
+void        workspace_set_status_entry(Workspace *ws,
+                                       const workspace_status_entry *entry);
+void        workspace_clear_status_entry(Workspace *ws,
+                                         const char *entry_id);
+GPtrArray  *workspace_get_sorted_status_entries(Workspace *ws);
+int         workspace_get_sidebar_column_count(Workspace *ws);
+int         workspace_get_sidebar_tab_count(Workspace *ws);
+gboolean    workspace_get_sidebar_attention_state(Workspace *ws);
+char       *workspace_get_sidebar_ports_summary(Workspace *ws);
+gboolean    workspace_get_sidebar_progress(Workspace *ws,
+                                           int *state_out,
+                                           int *percent_out);
+
+void workspace_focus_first_terminal(Workspace *ws);
+
 void workspace_set_shutting_down(void);
 gboolean workspace_move_tab(int src_ws_idx, int src_pane_idx, int src_tab_idx,
                             int dest_ws_idx, int dest_pane_idx);
+Workspace *workspace_detach_from_instance(int index);
+gboolean workspace_attach_to_instance(Workspace *ws, int target_index);
+gboolean workspace_import_from_payload(const char *payload,
+                                       ghostty_app_t app,
+                                       int *out_workspace_index,
+                                       char **error_out);
+gboolean workspace_move_to_instance(int source_workspace_index,
+                                    const char *target_instance_id,
+                                    int *out_target_workspace_index,
+                                    char **error_out);
 gboolean workspace_select_tab(int ws_idx, int pane_idx, int tab_idx);
 gboolean workspace_close_tab_at(Workspace *ws, GtkNotebook *notebook, int page);
 gboolean workspace_close_terminal(Workspace *ws, GtkWidget *terminal);

@@ -11,6 +11,7 @@ typedef struct {
     char *toast_position;
     gboolean focus_on_hover;
     gboolean open_links_in_browser;
+    WorkspaceLayoutMode default_layout_mode;
     char *gtk_renderer_mode;
     char *gtk_renderer_probe_result;
     int tab_height;
@@ -24,6 +25,7 @@ static AppSettingsState app_settings = {
     .toast_position = NULL,
     .focus_on_hover = TRUE,
     .open_links_in_browser = TRUE,
+    .default_layout_mode = WORKSPACE_LAYOUT_CLASSIC,
     .gtk_renderer_mode = NULL,
     .gtk_renderer_probe_result = NULL,
     .tab_height = 42,
@@ -223,6 +225,15 @@ app_settings_load(void)
         if (g_key_file_has_key(kf, "ui", "open_links_in_browser", NULL))
             app_settings.open_links_in_browser =
                 g_key_file_get_boolean(kf, "ui", "open_links_in_browser", NULL);
+        if (g_key_file_has_key(kf, "ui", "default_layout_mode", NULL)) {
+            char *mode =
+                g_key_file_get_string(kf, "ui", "default_layout_mode", NULL);
+            app_settings.default_layout_mode =
+                g_strcmp0(mode, "strip") == 0
+                    ? WORKSPACE_LAYOUT_STRIP
+                    : WORKSPACE_LAYOUT_CLASSIC;
+            g_free(mode);
+        }
         if (g_key_file_has_key(kf, "ui", "gtk_renderer_mode", NULL))
             app_settings.gtk_renderer_mode =
                 g_key_file_get_string(kf, "ui", "gtk_renderer_mode", NULL);
@@ -279,6 +290,11 @@ app_settings_save(void)
                            app_settings.focus_on_hover);
     g_key_file_set_boolean(kf, "ui", "open_links_in_browser",
                            app_settings.open_links_in_browser);
+    g_key_file_set_string(kf, "ui", "default_layout_mode",
+                          app_settings.default_layout_mode ==
+                                  WORKSPACE_LAYOUT_STRIP
+                              ? "strip"
+                              : "classic");
     g_key_file_set_string(kf, "ui", "gtk_renderer_mode",
                           app_settings.gtk_renderer_mode &&
                           app_settings.gtk_renderer_mode[0]
@@ -395,6 +411,22 @@ app_settings_set_open_links_in_browser(gboolean enabled)
 {
     app_settings_load();
     app_settings.open_links_in_browser = enabled != FALSE;
+}
+
+WorkspaceLayoutMode
+app_settings_get_default_layout_mode(void)
+{
+    app_settings_load();
+    return app_settings.default_layout_mode;
+}
+
+void
+app_settings_set_default_layout_mode(WorkspaceLayoutMode mode)
+{
+    app_settings_load();
+    app_settings.default_layout_mode = mode == WORKSPACE_LAYOUT_STRIP
+        ? WORKSPACE_LAYOUT_STRIP
+        : WORKSPACE_LAYOUT_CLASSIC;
 }
 
 const char *

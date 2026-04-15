@@ -120,15 +120,172 @@ socket_is_connectable(const char *path)
     return ok;
 }
 
+static gboolean
+write_all_bytes(int fd, const char *buf, gsize len)
+{
+    const char *cursor = buf;
+    gsize remaining = len;
+
+    while (remaining > 0) {
+        ssize_t written = write(fd, cursor, remaining);
+        if (written < 0) {
+            if (errno == EINTR)
+                continue;
+            return FALSE;
+        }
+        if (written == 0) {
+            errno = EIO;
+            return FALSE;
+        }
+        cursor += written;
+        remaining -= (gsize)written;
+    }
+
+    return TRUE;
+}
+
+static gboolean
+instance_id_char_allowed(char c)
+{
+    return g_ascii_isalnum(c) || c == '-' || c == '_' || c == '.';
+}
+
+static gboolean
+instance_id_is_valid(const char *instance_id)
+{
+    if (!instance_id || !instance_id[0])
+        return FALSE;
+
+    for (const char *p = instance_id; *p; p++) {
+        if (!instance_id_char_allowed(*p))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static gboolean
+build_socket_path_for_instance(const char *instance_id,
+                               char *out,
+                               gsize out_size)
+{
+    if (!out || out_size == 0 || !instance_id_is_valid(instance_id))
+        return FALSE;
+
+    g_snprintf(out, out_size, "/tmp/prettymux-%s.sock", instance_id);
+    return TRUE;
+}
+
+static gboolean
+socket_name_matches_pattern(const char *name)
+{
+    gsize len;
+
+    if (!name)
+        return FALSE;
+
+    len = strlen(name);
+    if (len <= 15)
+        return FALSE;
+    if (strncmp(name, "prettymux-", 10) != 0)
+        return FALSE;
+    return g_strcmp0(name + len - 5, ".sock") == 0;
+}
+
+static gboolean
+parse_instance_id_from_socket_name(const char *name, char *out, gsize out_size)
+{
+    gsize len;
+    gsize id_len;
+
+    if (!name || !out || out_size == 0 || !socket_name_matches_pattern(name))
+        return FALSE;
+
+    len = strlen(name);
+    id_len = len - strlen("prettymux-") - strlen(".sock");
+    if (id_len == 0 || id_len + 1 > out_size)
+        return FALSE;
+
+    memcpy(out, name + strlen("prettymux-"), id_len);
+    out[id_len] = '\0';
+    return instance_id_is_valid(out);
+}
+
+static gboolean
+parse_numeric_instance_id(const char *instance_id, guint64 *value_out)
+{
+    char *end = NULL;
+    unsigned long long value;
+
+    if (!instance_id || !instance_id[0])
+        return FALSE;
+
+    errno = 0;
+    value = g_ascii_strtoull(instance_id, &end, 10);
+    if (errno != 0 || !end || *end != '\0')
+        return FALSE;
+
+    if (value_out)
+        *value_out = (guint64)value;
+    return TRUE;
+}
+
+static int
+compare_instance_id_for_default(const char *a, const char *b)
+{
+    guint64 a_num = 0;
+    guint64 b_num = 0;
+    gboolean a_is_numeric = parse_numeric_instance_id(a, &a_num);
+    gboolean b_is_numeric = parse_numeric_instance_id(b, &b_num);
+
+    if (a_is_numeric && b_is_numeric) {
+        if (a_num < b_num)
+            return -1;
+        if (a_num > b_num)
+            return 1;
+    } else if (a_is_numeric != b_is_numeric) {
+        return a_is_numeric ? -1 : 1;
+    }
+
+    return g_strcmp0(a, b);
+}
+
 static char *
 find_socket_path(GError **error)
 {
     const char *env = g_getenv("PRETTYMUX_SOCKET");
+    const char *env_instance = g_getenv("PRETTYMUX_INSTANCE_ID");
     DIR *dir;
     struct dirent *ent;
+    char best_candidate[256] = {0};
+    char best_instance_id[128] = {0};
+    gboolean found = FALSE;
 
-    if (env && env[0] && socket_is_connectable(env))
-        return g_strdup(env);
+    if (env && env[0]) {
+        if (socket_is_connectable(env))
+            return g_strdup(env);
+        g_set_error(error, g_quark_from_static_string("prettymux-agent-cli"),
+                    ENOENT,
+                    "PRETTYMUX_SOCKET target is not reachable: %s", env);
+        return NULL;
+    }
+
+    if (env_instance && env_instance[0]) {
+        char candidate[256];
+        if (!build_socket_path_for_instance(env_instance, candidate,
+                                            sizeof(candidate))) {
+            g_set_error(error, g_quark_from_static_string("prettymux-agent-cli"),
+                        EINVAL,
+                        "PRETTYMUX_INSTANCE_ID is invalid: %s", env_instance);
+            return NULL;
+        }
+        if (socket_is_connectable(candidate))
+            return g_strdup(candidate);
+        g_set_error(error, g_quark_from_static_string("prettymux-agent-cli"),
+                    ENOENT,
+                    "PRETTYMUX_INSTANCE_ID target is not reachable: %s",
+                    env_instance);
+        return NULL;
+    }
 
     dir = opendir("/tmp");
     if (!dir) {
@@ -139,21 +296,33 @@ find_socket_path(GError **error)
 
     while ((ent = readdir(dir)) != NULL) {
         char candidate[256];
+        char candidate_instance_id[128];
 
-        if (strncmp(ent->d_name, "prettymux-", 10) != 0 ||
-            strstr(ent->d_name, ".sock") == NULL)
+        if (!parse_instance_id_from_socket_name(ent->d_name,
+                                                candidate_instance_id,
+                                                sizeof(candidate_instance_id)))
             continue;
 
         g_snprintf(candidate, sizeof(candidate), "/tmp/%s", ent->d_name);
-        if (socket_is_connectable(candidate)) {
-            closedir(dir);
-            return g_strdup(candidate);
+        if (!socket_is_connectable(candidate))
+            continue;
+
+        if (!found ||
+            compare_instance_id_for_default(candidate_instance_id,
+                                            best_instance_id) < 0) {
+            g_strlcpy(best_candidate, candidate, sizeof(best_candidate));
+            g_strlcpy(best_instance_id, candidate_instance_id,
+                      sizeof(best_instance_id));
+            found = TRUE;
         }
     }
 
     closedir(dir);
+    if (found)
+        return g_strdup(best_candidate);
+
     set_error_literal(error,
-                      "No running PrettyMux instance found. Run this inside PrettyMux or set PRETTYMUX_SOCKET.");
+                      "No running PrettyMux instance found. Run this inside PrettyMux or set PRETTYMUX_SOCKET/PRETTYMUX_INSTANCE_ID.");
     return NULL;
 }
 
@@ -189,7 +358,7 @@ send_json_message(const char *json_msg, GError **error)
         return NULL;
     }
 
-    if (write(fd, json_msg, strlen(json_msg)) < 0) {
+    if (!write_all_bytes(fd, json_msg, strlen(json_msg))) {
         g_set_error(error, g_quark_from_static_string("prettymux-agent-cli"),
                     errno, "write() failed");
         close(fd);

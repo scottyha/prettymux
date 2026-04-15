@@ -877,7 +877,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect(window, "close-request",
                      G_CALLBACK(app_actions_on_close_request), NULL);
 
-    // ── Single instance socket server ──
+    // ── Per-instance socket server ──
     socket_server_set_callback(socket_commands_on_socket_command, NULL);
     const char *sock_path = socket_server_start();
     if (sock_path) {
@@ -891,10 +891,12 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     // Create initial workspace + restore or create defaults
     workspace_add(ui.terminal_stack, ui.workspace_list, g_ghostty_app);
 
-    if (session_exists()) {
-        session_restore(GTK_WINDOW(window), ui.browser_notebook,
-                        ui.terminal_stack, ui.workspace_list, g_ghostty_app,
-                        app_actions_add_browser_tab);
+    if (session_exists_for_instance(app_state_get_instance_id())) {
+        session_restore_for_instance(app_state_get_instance_id(),
+                                     GTK_WINDOW(window), ui.browser_notebook,
+                                     ui.terminal_stack, ui.workspace_list,
+                                     g_ghostty_app,
+                                     app_actions_add_browser_tab);
         apply_theme_to_ghostty_scheme();
     }
     // Always ensure at least one browser tab exists
@@ -917,6 +919,7 @@ int main(int argc, char *argv[]) {
     int cli_exit = 0;
 
     g_renderer_probe_target = g_getenv("PRETTYMUX_RENDERER_PROBE");
+    app_state_init_instance_id_from_env();
 
     if (!g_renderer_probe_target &&
         prettymux_agent_cli_maybe_run(argc, argv, &cli_exit))
@@ -942,8 +945,9 @@ int main(int argc, char *argv[]) {
         return probe_status;
     }
 
-    AdwApplication *app = adw_application_new("dev.prettymux.app",
-                                              G_APPLICATION_DEFAULT_FLAGS);
+    AdwApplication *app = adw_application_new(
+        "dev.prettymux.app",
+        G_APPLICATION_DEFAULT_FLAGS | G_APPLICATION_NON_UNIQUE);
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
     g_signal_connect(app, "shutdown", G_CALLBACK(on_app_shutdown), NULL);
 

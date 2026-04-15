@@ -6,10 +6,14 @@
 #include "app_actions.h"
 #include "app_state.h"
 #include "app_support.h"
+#include "notifications.h"
 #include "session.h"
 #include "shortcuts.h"
+#include "socket_server.h"
 #include "terminal_routing.h"
 #include "workspace.h"
+#include "workspace_layout.h"
+#include "workspace_strip.h"
 
 static char *
 prettymux_trim_last_lines(const char *text, int lines)
@@ -71,13 +75,75 @@ resolve_target_terminal(Workspace *ws,
     return NULL;
 }
 
+static Workspace *
+resolve_workspace_target(JsonObject *msg, int *out_idx)
+{
+    int idx = (int)json_object_get_int_member_with_default(
+        msg, "workspace", current_workspace);
+
+    if (!workspaces || idx < 0 || idx >= (int)workspaces->len)
+        return NULL;
+
+    if (out_idx)
+        *out_idx = idx;
+    return g_ptr_array_index(workspaces, idx);
+}
+
+static void
+json_builder_add_workspace_status_entry(JsonBuilder *response,
+                                        const workspace_status_entry *entry)
+{
+    json_builder_begin_object(response);
+    json_builder_set_member_name(response, "entryId");
+    json_builder_add_string_value(response, entry ? entry->entry_id : "");
+    json_builder_set_member_name(response, "provider");
+    json_builder_add_string_value(response, entry ? entry->provider : "");
+    json_builder_set_member_name(response, "kind");
+    json_builder_add_string_value(response, entry ? entry->kind : "");
+    json_builder_set_member_name(response, "status");
+    json_builder_add_string_value(response, entry ? entry->status : "");
+    json_builder_set_member_name(response, "summary");
+    json_builder_add_string_value(response, entry ? entry->summary : "");
+    json_builder_set_member_name(response, "detail");
+    json_builder_add_string_value(response, entry ? entry->detail : "");
+    json_builder_set_member_name(response, "attention");
+    json_builder_add_boolean_value(response, entry ? entry->attention : FALSE);
+    json_builder_set_member_name(response, "updatedAtUsec");
+    json_builder_add_int_value(response, entry ? entry->updated_at_usec : 0);
+    json_builder_end_object(response);
+}
+
 void
 socket_commands_on_socket_command(const char  *command,
                                   JsonObject  *msg,
                                   JsonBuilder *response,
                                   gpointer     user_data)
 {
+    const char *target_instance;
+    const char *local_instance;
+
     (void)user_data;
+    target_instance =
+        json_object_get_string_member_with_default(msg, "instanceId", "");
+    local_instance = app_state_get_instance_id();
+
+    if (target_instance[0] && g_strcmp0(target_instance, local_instance) != 0) {
+        g_autoptr(GError) route_error = NULL;
+
+        if (socket_server_route_command_to_instance(target_instance, msg,
+                                                    response, &route_error))
+            return;
+
+        json_builder_set_member_name(response, "status");
+        json_builder_add_string_value(response, "error");
+        json_builder_set_member_name(response, "message");
+        json_builder_add_string_value(
+            response,
+            (route_error && route_error->message)
+                ? route_error->message
+                : "failed to route command to requested instance");
+        return;
+    }
 
     if (strcmp(command, "tabs.list") == 0) {
         json_builder_set_member_name(response, "status");
@@ -244,6 +310,303 @@ socket_commands_on_socket_command(const char  *command,
             json_builder_add_string_value(response, "error");
             json_builder_set_member_name(response, "message");
             json_builder_add_string_value(response, "invalid workspace index");
+        }
+    } else if (strcmp(command, "workspace.import") == 0) {
+        const char *payload = json_object_get_string_member_with_default(
+            msg, "workspacePayload", "");
+        g_autofree char *import_error = NULL;
+        int imported_idx = -1;
+
+        if (workspace_import_from_payload(payload, g_ghostty_app, &imported_idx,
+                                          &import_error)) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "ok");
+            json_builder_set_member_name(response, "index");
+            json_builder_add_int_value(response, imported_idx);
+        } else {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(
+                response,
+                import_error ? import_error : "workspace import failed");
+        }
+    } else if (strcmp(command, "workspace.move_to_instance") == 0) {
+        int idx = (int)json_object_get_int_member_with_default(
+            msg, "workspace", current_workspace);
+        const char *target_instance_id =
+            json_object_get_string_member_with_default(msg, "targetInstanceId",
+                                                       "");
+        g_autofree char *move_error = NULL;
+        int target_ws_idx = -1;
+
+        if (workspace_move_to_instance(idx, target_instance_id, &target_ws_idx,
+                                       &move_error)) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "ok");
+            json_builder_set_member_name(response, "workspace");
+            json_builder_add_int_value(response, idx);
+            json_builder_set_member_name(response, "targetInstanceId");
+            json_builder_add_string_value(response, target_instance_id);
+            json_builder_set_member_name(response, "targetWorkspace");
+            json_builder_add_int_value(response, target_ws_idx);
+        } else {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(
+                response,
+                move_error ? move_error : "workspace move failed");
+        }
+    } else if (strcmp(command, "workspace.set_layout") == 0) {
+        int idx = (int)json_object_get_int_member_with_default(msg, "workspace", current_workspace);
+        const char *layout =
+            json_object_get_string_member_with_default(msg, "layout", "");
+        Workspace *ws = NULL;
+        WorkspaceLayoutMode mode = WORKSPACE_LAYOUT_CLASSIC;
+
+        if (idx >= 0 && workspaces && idx < (int)workspaces->len)
+            ws = g_ptr_array_index(workspaces, idx);
+
+        if (g_strcmp0(layout, "strip") == 0)
+            mode = WORKSPACE_LAYOUT_STRIP;
+        else if (g_strcmp0(layout, "classic") == 0)
+            mode = WORKSPACE_LAYOUT_CLASSIC;
+        else {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(response, "invalid layout (use 'classic' or 'strip')");
+            goto set_layout_done;
+        }
+
+        if (!ws) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(response, "invalid workspace index");
+            goto set_layout_done;
+        }
+
+        if (workspace_rebuild_for_layout_mode(ws, mode)) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "ok");
+            json_builder_set_member_name(response, "layout");
+            json_builder_add_string_value(response, layout);
+        } else {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(response, "set_layout failed");
+        }
+    set_layout_done:
+        (void)0;
+    } else if (strcmp(command, "workspace.get_layout") == 0) {
+        int idx = (int)json_object_get_int_member_with_default(msg, "workspace", current_workspace);
+        Workspace *ws = NULL;
+
+        if (idx >= 0 && workspaces && idx < (int)workspaces->len)
+            ws = g_ptr_array_index(workspaces, idx);
+
+        if (ws) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "ok");
+            json_builder_set_member_name(response, "layout");
+            if (workspace_get_layout_mode(ws) == WORKSPACE_LAYOUT_STRIP)
+                json_builder_add_string_value(response, "strip");
+            else
+                json_builder_add_string_value(response, "classic");
+        } else {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(response, "invalid workspace index");
+        }
+    } else if (strcmp(command, "workspace.get_strip_state") == 0) {
+        int idx = (int)json_object_get_int_member_with_default(
+            msg, "workspace", current_workspace);
+        Workspace *ws = NULL;
+        WorkspaceStripState *state = NULL;
+
+        if (idx >= 0 && workspaces && idx < (int)workspaces->len)
+            ws = g_ptr_array_index(workspaces, idx);
+
+        if (!ws) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(response, "invalid workspace index");
+        } else if (workspace_get_layout_mode(ws) != WORKSPACE_LAYOUT_STRIP) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(response, "workspace layout is not strip");
+        } else {
+            int focused_col = 0;
+
+            state = ws->strip_state;
+            if (state && state->focused_col >= 0)
+                focused_col = state->focused_col;
+
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "ok");
+            json_builder_set_member_name(response, "layout");
+            json_builder_add_string_value(response, "strip");
+            json_builder_set_member_name(response, "focusedColumn");
+            json_builder_add_int_value(response, focused_col);
+            json_builder_set_member_name(response, "columns");
+            json_builder_begin_array(response);
+            if (state && state->columns) {
+                for (guint i = 0; i < state->columns->len; i++) {
+                    WorkspaceColumn *col = g_ptr_array_index(state->columns, i);
+                    const char *pane_id = NULL;
+                    int width = 600;
+
+                    if (!col)
+                        continue;
+                    if (col->target_width > 0)
+                        width = col->target_width;
+                    if (GTK_IS_NOTEBOOK(col->notebook))
+                        pane_id = workspace_get_pane_id(GTK_NOTEBOOK(col->notebook));
+
+                    json_builder_begin_object(response);
+                    json_builder_set_member_name(response, "index");
+                    json_builder_add_int_value(response, (int)i);
+                    json_builder_set_member_name(response, "paneId");
+                    json_builder_add_string_value(response, pane_id ? pane_id : "");
+                    json_builder_set_member_name(response, "width");
+                    json_builder_add_int_value(response, width);
+                    json_builder_set_member_name(response, "maximized");
+                    json_builder_add_boolean_value(response, col->maximized);
+                    json_builder_set_member_name(response, "focused");
+                    json_builder_add_boolean_value(response, (int)i == focused_col);
+                    json_builder_end_object(response);
+                }
+            }
+            json_builder_end_array(response);
+        }
+    } else if (strcmp(command, "workspace.status.set") == 0) {
+        Workspace *ws = NULL;
+        int ws_idx = -1;
+        const char *entry_id =
+            json_object_get_string_member_with_default(msg, "entryId", "");
+        gboolean should_notify =
+            json_object_get_boolean_member_with_default(msg, "notify", FALSE);
+        gint64 updated_usec =
+            json_object_get_int_member_with_default(msg, "updatedAtUsec", 0);
+        gint64 updated_ms =
+            json_object_get_int_member_with_default(msg, "updatedAtMs", 0);
+
+        ws = resolve_workspace_target(msg, &ws_idx);
+        if (!ws) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(response, "invalid workspace index");
+        } else if (!entry_id[0]) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(response, "missing entryId");
+        } else {
+            workspace_status_entry entry = {0};
+
+            g_strlcpy(entry.entry_id, entry_id, sizeof(entry.entry_id));
+            g_strlcpy(entry.provider,
+                      json_object_get_string_member_with_default(
+                          msg, "provider", ""),
+                      sizeof(entry.provider));
+            g_strlcpy(entry.kind,
+                      json_object_get_string_member_with_default(
+                          msg, "kind", ""),
+                      sizeof(entry.kind));
+            g_strlcpy(entry.status,
+                      json_object_get_string_member_with_default(
+                          msg, "state", ""),
+                      sizeof(entry.status));
+            g_strlcpy(entry.summary,
+                      json_object_get_string_member_with_default(
+                          msg, "summary", ""),
+                      sizeof(entry.summary));
+            g_strlcpy(entry.detail,
+                      json_object_get_string_member_with_default(
+                          msg, "detail", ""),
+                      sizeof(entry.detail));
+            entry.attention =
+                json_object_get_boolean_member_with_default(msg, "attention",
+                                                            FALSE);
+            if (updated_usec > 0)
+                entry.updated_at_usec = updated_usec;
+            else if (updated_ms > 0)
+                entry.updated_at_usec = updated_ms * 1000;
+            else
+                entry.updated_at_usec = g_get_real_time();
+
+            workspace_set_status_entry(ws, &entry);
+            if (should_notify)
+                notifications_publish_workspace_status(ws, &entry, TRUE);
+
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "ok");
+            json_builder_set_member_name(response, "workspace");
+            json_builder_add_int_value(response, ws_idx);
+            json_builder_set_member_name(response, "entryId");
+            json_builder_add_string_value(response, entry.entry_id);
+        }
+    } else if (strcmp(command, "workspace.status.clear") == 0) {
+        Workspace *ws = NULL;
+        int ws_idx = -1;
+        const char *entry_id =
+            json_object_get_string_member_with_default(msg, "entryId", "");
+
+        ws = resolve_workspace_target(msg, &ws_idx);
+        if (!ws) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(response, "invalid workspace index");
+        } else if (!entry_id[0]) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(response, "missing entryId");
+        } else {
+            workspace_clear_status_entry(ws, entry_id);
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "ok");
+            json_builder_set_member_name(response, "workspace");
+            json_builder_add_int_value(response, ws_idx);
+            json_builder_set_member_name(response, "entryId");
+            json_builder_add_string_value(response, entry_id);
+        }
+    } else if (strcmp(command, "workspace.status.list") == 0) {
+        Workspace *ws = NULL;
+        int ws_idx = -1;
+        g_autoptr(GPtrArray) entries = NULL;
+
+        ws = resolve_workspace_target(msg, &ws_idx);
+        if (!ws) {
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "error");
+            json_builder_set_member_name(response, "message");
+            json_builder_add_string_value(response, "invalid workspace index");
+        } else {
+            entries = workspace_get_sorted_status_entries(ws);
+
+            json_builder_set_member_name(response, "status");
+            json_builder_add_string_value(response, "ok");
+            json_builder_set_member_name(response, "workspace");
+            json_builder_add_int_value(response, ws_idx);
+            json_builder_set_member_name(response, "entries");
+            json_builder_begin_array(response);
+            if (entries) {
+                for (guint i = 0; i < entries->len; i++) {
+                    workspace_status_entry *entry =
+                        g_ptr_array_index(entries, i);
+                    json_builder_add_workspace_status_entry(response, entry);
+                }
+            }
+            json_builder_end_array(response);
         }
     } else if (strcmp(command, "workspace.equalize_splits") == 0) {
         int idx = (int)json_object_get_int_member_with_default(msg, "workspace", current_workspace);
@@ -508,10 +871,22 @@ socket_commands_on_socket_command(const char  *command,
         }
     } else if (strcmp(command, "action") == 0) {
         const char *act = json_object_get_string_member_with_default(msg, "action", "");
+        gboolean non_interactive =
+            json_object_get_boolean_member_with_default(msg, "nonInteractive",
+                                                        FALSE);
         if (act && act[0]) {
-            app_actions_handle(act);
-            json_builder_set_member_name(response, "status");
-            json_builder_add_string_value(response, "ok");
+            const char *error_message = NULL;
+            if (app_actions_handle_for_socket(act, non_interactive,
+                                              &error_message)) {
+                json_builder_set_member_name(response, "status");
+                json_builder_add_string_value(response, "ok");
+            } else {
+                json_builder_set_member_name(response, "status");
+                json_builder_add_string_value(response, "error");
+                json_builder_set_member_name(response, "message");
+                json_builder_add_string_value(
+                    response, error_message ? error_message : "action failed");
+            }
         } else {
             json_builder_set_member_name(response, "status");
             json_builder_add_string_value(response, "error");
@@ -721,6 +1096,13 @@ socket_commands_on_socket_command(const char  *command,
         json_builder_add_string_value(response, "workspace.new");
         json_builder_add_string_value(response, "workspace.list");
         json_builder_add_string_value(response, "workspace.switch");
+        json_builder_add_string_value(response, "workspace.import");
+        json_builder_add_string_value(response, "workspace.move_to_instance");
+        json_builder_add_string_value(response, "workspace.set_layout");
+        json_builder_add_string_value(response, "workspace.get_layout");
+        json_builder_add_string_value(response, "workspace.status.set");
+        json_builder_add_string_value(response, "workspace.status.clear");
+        json_builder_add_string_value(response, "workspace.status.list");
         json_builder_add_string_value(response, "tabs.list");
         json_builder_add_string_value(response, "tab.new");
         json_builder_add_string_value(response, "tab.move");
@@ -737,6 +1119,11 @@ socket_commands_on_socket_command(const char  *command,
     }
 
     if (strcmp(command, "workspace.list") != 0 &&
+        strcmp(command, "workspace.get_layout") != 0 &&
+        strcmp(command, "workspace.get_strip_state") != 0 &&
+        strcmp(command, "workspace.status.list") != 0 &&
+        strcmp(command, "workspace.status.set") != 0 &&
+        strcmp(command, "workspace.status.clear") != 0 &&
         strcmp(command, "tabs.list") != 0 &&
         strcmp(command, "list.actions") != 0 &&
         strcmp(command, "app.quit") != 0 &&
