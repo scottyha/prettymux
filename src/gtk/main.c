@@ -511,6 +511,7 @@ on_app_shutdown(GApplication *app, gpointer user_data)
         session_begin_shutdown();
         workspace_set_shutting_down();
     }
+    workspace_shutdown_terminals();
 }
 
 /* ── GApplication action: navigate to a specific terminal from notification click ── */

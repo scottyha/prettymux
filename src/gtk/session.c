@@ -465,6 +465,7 @@ session_strip_rebuild_columns_from_saved_state(Workspace *ws,
                 if (!pane || g_hash_table_contains(seen_panes, pane))
                     continue;
 
+                g_object_ref(pane);
                 g_ptr_array_add(col_panes, pane);
                 g_hash_table_add(seen_panes, pane);
             }
@@ -475,6 +476,7 @@ session_strip_rebuild_columns_from_saved_state(Workspace *ws,
             GtkNotebook *pane = workspace_get_pane_by_id(ws, pane_id);
 
             if (pane && !g_hash_table_contains(seen_panes, pane)) {
+                g_object_ref(pane);
                 g_ptr_array_add(col_panes, pane);
                 g_hash_table_add(seen_panes, pane);
             }
@@ -546,6 +548,7 @@ session_strip_rebuild_columns_from_saved_state(Workspace *ws,
 
             col = g_new0(WorkspaceColumn, 1);
             col->panes = g_ptr_array_new();
+            g_object_ref(pane);
             g_ptr_array_add(col->panes, pane);
             col->focused_pane = 0;
             col->target_width = SESSION_STRIP_DEFAULT_COL_WIDTH;
@@ -561,13 +564,11 @@ session_strip_rebuild_columns_from_saved_state(Workspace *ws,
         return;
 
     if (state->column_box) {
-        for (guint i = 0; i < state->columns->len; i++) {
-            WorkspaceColumn *old_col = g_ptr_array_index(state->columns, i);
-            if (!old_col || !old_col->notebook)
-                continue;
-            if (gtk_widget_get_parent(old_col->notebook) == state->column_box) {
-                gtk_box_remove(GTK_BOX(state->column_box), old_col->notebook);
-            }
+        GtkWidget *child = gtk_widget_get_first_child(state->column_box);
+        while (child) {
+            GtkWidget *next = gtk_widget_get_next_sibling(child);
+            gtk_box_remove(GTK_BOX(state->column_box), child);
+            child = next;
         }
     }
 
@@ -575,9 +576,19 @@ session_strip_rebuild_columns_from_saved_state(Workspace *ws,
     for (guint i = 0; i < rebuilt_columns->len; i++) {
         WorkspaceColumn *col = g_ptr_array_index(rebuilt_columns, i);
         g_ptr_array_add(state->columns, col);
-        if (state->column_box && col->notebook &&
-            gtk_widget_get_parent(col->notebook) != state->column_box) {
+        if (state->column_box && col->notebook) {
             gtk_box_append(GTK_BOX(state->column_box), col->notebook);
+        }
+    }
+
+    for (guint i = 0; i < rebuilt_columns->len; i++) {
+        WorkspaceColumn *col = g_ptr_array_index(rebuilt_columns, i);
+        if (!col || !col->panes)
+            continue;
+        for (guint pi = 0; pi < col->panes->len; pi++) {
+            GtkWidget *pane_widget = g_ptr_array_index(col->panes, pi);
+            if (pane_widget)
+                g_object_unref(pane_widget);
         }
     }
 
@@ -593,7 +604,8 @@ session_strip_rebuild_columns_from_saved_state(Workspace *ws,
             }
         }
         if (ws->pane_notebooks->len > 0)
-            ws->notebook = g_ptr_array_index(ws->pane_notebooks, 0);
+            workspace_set_primary_notebook(
+                ws, g_ptr_array_index(ws->pane_notebooks, 0));
     }
 
     g_ptr_array_set_size(rebuilt_columns, 0);

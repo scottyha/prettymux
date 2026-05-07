@@ -13,9 +13,13 @@
 #include "hover_focus.h"
 #include "socket_server.h"
 
+#include <errno.h>
 #include <gdk/gdk.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef G_OS_WIN32
+#include <signal.h>
+#endif
 
 /* ── Signal IDs ────────────────────────────────────────────────── */
 
@@ -822,6 +826,10 @@ on_click_pressed(GtkGestureClick *gesture,
     ghostty_surface_mouse_pos(self->surface, x, y, translate_mods(state));
     ghostty_surface_mouse_button(self->surface, GHOSTTY_MOUSE_PRESS,
                                  translate_button(button), translate_mods(state));
+    /* Keep drag-selection owned by the terminal once it starts here.
+     * Without claiming the sequence, the workspace sidebar can steal the
+     * pointer when the drag gets close to the left edge. */
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
     gtk_gl_area_queue_render(self->gl_area);
 }
 
@@ -852,6 +860,7 @@ on_click_released(GtkGestureClick *gesture,
     ghostty_surface_mouse_pos(self->surface, x, y, translate_mods(state));
     ghostty_surface_mouse_button(self->surface, GHOSTTY_MOUSE_RELEASE,
                                  translate_button(button), translate_mods(state));
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
     gtk_gl_area_queue_render(self->gl_area);
 }
 
@@ -1395,6 +1404,50 @@ ghostty_terminal_focus(GhosttyTerminal *self)
             ghostty_surface_set_focus(self->surface, true);
         gtk_gl_area_queue_render(self->gl_area);
     }
+}
+
+void
+ghostty_terminal_request_close(GhosttyTerminal *self)
+{
+    g_return_if_fail(GHOSTTY_IS_TERMINAL(self));
+
+    if (!self->surface || ghostty_surface_process_exited(self->surface))
+        return;
+
+    ghostty_surface_request_close(self->surface);
+}
+
+gboolean
+ghostty_terminal_process_exited(GhosttyTerminal *self)
+{
+    g_return_val_if_fail(GHOSTTY_IS_TERMINAL(self), TRUE);
+
+    if (self->surface)
+        return ghostty_surface_process_exited(self->surface);
+
+    return self->exit_code >= 0;
+}
+
+gboolean
+ghostty_terminal_hangup_session(GhosttyTerminal *self)
+{
+#ifdef G_OS_WIN32
+    (void)self;
+    return FALSE;
+#else
+    pid_t sid;
+
+    g_return_val_if_fail(GHOSTTY_IS_TERMINAL(self), FALSE);
+
+    sid = self->session_id;
+    if (sid <= 0)
+        return FALSE;
+
+    if (kill(-sid, SIGHUP) == 0)
+        return TRUE;
+
+    return errno == ESRCH;
+#endif
 }
 
 void

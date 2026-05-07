@@ -632,6 +632,53 @@ test_insert_column_after_active_inserts_and_focuses(void)
 }
 
 static void
+test_split_vertical_preserves_existing_notebook_lifetime(void)
+{
+    Workspace *ws = make_strip_workspace();
+    GtkWidget *nb0 = gtk_notebook_new();
+    GtkWidget *nb1 = gtk_notebook_new();
+    gboolean nb0_destroyed = FALSE;
+
+    workspace_strip_create_root(ws, nb0);
+    g_object_weak_ref(G_OBJECT(nb0), on_notebook_destroyed, &nb0_destroyed);
+
+    g_assert_true(workspace_strip_split_vertical_in_column(ws, nb1));
+    g_assert_false(nb0_destroyed);
+
+    WorkspaceColumn *col = g_ptr_array_index(ws->strip_state->columns, 0);
+    g_assert_nonnull(col);
+    g_assert_cmpuint(col->panes->len, ==, 2);
+    g_assert_true(g_ptr_array_index(col->panes, 0) == nb0);
+    g_assert_true(g_ptr_array_index(col->panes, 1) == nb1);
+
+    free_strip_workspace(ws);
+}
+
+static void
+test_remove_pane_from_column_preserves_survivor_lifetime(void)
+{
+    Workspace *ws = make_strip_workspace();
+    GtkWidget *nb0 = gtk_notebook_new();
+    GtkWidget *nb1 = gtk_notebook_new();
+    gboolean nb0_destroyed = FALSE;
+
+    workspace_strip_create_root(ws, nb0);
+    g_assert_true(workspace_strip_split_vertical_in_column(ws, nb1));
+    g_object_weak_ref(G_OBJECT(nb0), on_notebook_destroyed, &nb0_destroyed);
+
+    g_assert_true(workspace_strip_remove_pane_from_column(ws, GTK_NOTEBOOK(nb1)));
+    g_assert_false(nb0_destroyed);
+
+    WorkspaceColumn *col = g_ptr_array_index(ws->strip_state->columns, 0);
+    g_assert_nonnull(col);
+    g_assert_cmpuint(col->panes->len, ==, 1);
+    g_assert_true(g_ptr_array_index(col->panes, 0) == nb0);
+    g_assert_true(col->notebook == nb0);
+
+    free_strip_workspace(ws);
+}
+
+static void
 test_remove_active_column_updates_focus(void)
 {
     Workspace *ws = make_strip_workspace();
@@ -1067,6 +1114,10 @@ main(int argc, char **argv)
                         test_teardown_widget_destroyed_before_state_free);
         g_test_add_func("/workspace-strip/columns/insert-after-active",
                         test_insert_column_after_active_inserts_and_focuses);
+        g_test_add_func("/workspace-strip/columns/split-vertical-preserves-existing",
+                        test_split_vertical_preserves_existing_notebook_lifetime);
+        g_test_add_func("/workspace-strip/columns/remove-pane-preserves-survivor",
+                        test_remove_pane_from_column_preserves_survivor_lifetime);
         g_test_add_func("/workspace-strip/columns/remove-active",
                         test_remove_active_column_updates_focus);
         g_test_add_func("/workspace-strip/columns/remove-active-single-fails",

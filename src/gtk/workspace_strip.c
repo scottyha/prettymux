@@ -828,6 +828,7 @@ workspace_strip_split_vertical_in_column(Workspace *ws, GtkWidget *new_notebook)
     GtkWidget *new_root;
     GPtrArray *held_panes;
     int active_col = 0;
+    int insert_idx = 0;
 
     if (!ws || !ws->strip_state || !new_notebook)
         return FALSE;
@@ -846,33 +847,24 @@ workspace_strip_split_vertical_in_column(Workspace *ws, GtkWidget *new_notebook)
     gtk_widget_set_vexpand(new_notebook, TRUE);
     wire_column_focus_tracking(new_notebook);
 
-    g_ptr_array_add(col->panes, new_notebook);
-    col->focused_pane = (int)col->panes->len - 1;
+    insert_idx = CLAMP(col->focused_pane + 1, 0, (int)col->panes->len);
+    g_ptr_array_insert(col->panes, insert_idx, new_notebook);
+    col->focused_pane = insert_idx;
+
+    held_panes = g_ptr_array_new();
+    for (guint i = 0; i < col->panes->len; i++) {
+        GtkWidget *nb = g_ptr_array_index(col->panes, i);
+        if (!nb || nb == new_notebook)
+            continue;
+        if (!gtk_widget_get_parent(nb))
+            continue;
+        g_object_ref(nb);
+        g_ptr_array_add(held_panes, nb);
+    }
 
     if (old_root && state->column_box &&
         gtk_widget_get_parent(old_root) == state->column_box) {
-        g_object_ref(old_root);
         gtk_box_remove(GTK_BOX(state->column_box), old_root);
-    } else {
-        old_root = NULL;
-    }
-
-    held_panes = g_ptr_array_new();
-    if (col->panes->len > 1) {
-        for (guint i = 0; i < col->panes->len - 1; i++) {
-            GtkWidget *nb = g_ptr_array_index(col->panes, i);
-            GtkWidget *parent = gtk_widget_get_parent(nb);
-            if (parent) {
-                g_object_ref(nb);
-                g_ptr_array_add(held_panes, nb);
-                if (GTK_IS_PANED(parent)) {
-                    if (gtk_paned_get_start_child(GTK_PANED(parent)) == nb)
-                        gtk_paned_set_start_child(GTK_PANED(parent), NULL);
-                    else
-                        gtk_paned_set_end_child(GTK_PANED(parent), NULL);
-                }
-            }
-        }
     }
 
     new_root = rebuild_column_paned_chain(col->panes);
@@ -889,9 +881,6 @@ workspace_strip_split_vertical_in_column(Workspace *ws, GtkWidget *new_notebook)
         g_object_unref(nb);
     }
     g_ptr_array_free(held_panes, TRUE);
-
-    if (old_root)
-        g_object_unref(old_root);
 
     workspace_strip_apply_layout(ws);
     return TRUE;
@@ -994,6 +983,17 @@ workspace_strip_remove_pane_from_column(Workspace *ws, GtkNotebook *pane)
 
     old_root = col->notebook;
 
+    held_panes = g_ptr_array_new();
+    for (guint i = 0; i < col->panes->len; i++) {
+        GtkWidget *nb = g_ptr_array_index(col->panes, i);
+
+        if ((int)i == pane_idx || !nb || !gtk_widget_get_parent(nb))
+            continue;
+
+        g_object_ref(nb);
+        g_ptr_array_add(held_panes, nb);
+    }
+
     if (old_root && state->column_box &&
         gtk_widget_get_parent(old_root) == state->column_box) {
         g_object_ref(old_root);
@@ -1001,16 +1001,10 @@ workspace_strip_remove_pane_from_column(Workspace *ws, GtkNotebook *pane)
     } else {
         old_root = NULL;
     }
-
-    held_panes = g_ptr_array_new();
     for (guint i = 0; i < col->panes->len; i++) {
         GtkWidget *nb = g_ptr_array_index(col->panes, i);
         GtkWidget *parent = gtk_widget_get_parent(nb);
         if (parent && GTK_IS_PANED(parent)) {
-            if ((int)i != pane_idx) {
-                g_object_ref(nb);
-                g_ptr_array_add(held_panes, nb);
-            }
             if (gtk_paned_get_start_child(GTK_PANED(parent)) == nb)
                 gtk_paned_set_start_child(GTK_PANED(parent), NULL);
             else

@@ -147,6 +147,8 @@ static gboolean workspace_move_restore_layout_node(Workspace *ws,
 static void workspace_move_restore_strip_state(Workspace *ws,
                                                JsonObject *ws_obj);
 static GtkWidget *create_workspace_row(Workspace *ws);
+static void workspace_assign_weak_widget(GtkWidget **slot, GtkWidget *widget);
+static void workspace_assign_weak_notebook(GtkWidget **slot, GtkWidget *notebook);
 
 /* Context menu data for sidebar rows (defined later) */
 typedef struct {
@@ -236,6 +238,30 @@ workspace_cancel_git_branch_detect(Workspace *ws)
         g_cancellable_cancel(ws->git_branch_cancel);
         g_clear_object(&ws->git_branch_cancel);
     }
+}
+
+static void
+workspace_assign_weak_widget(GtkWidget **slot, GtkWidget *widget)
+{
+    if (!slot)
+        return;
+
+    if (*slot == widget)
+        return;
+
+    if (*slot)
+        g_object_remove_weak_pointer(G_OBJECT(*slot), (gpointer *)slot);
+
+    *slot = widget;
+
+    if (widget)
+        g_object_add_weak_pointer(G_OBJECT(widget), (gpointer *)slot);
+}
+
+static void
+workspace_assign_weak_notebook(GtkWidget **slot, GtkWidget *notebook)
+{
+    workspace_assign_weak_widget(slot, notebook);
 }
 
 static GtkWidget *
@@ -425,8 +451,14 @@ emoji_for_path(const char *path)
         return "🖥️";
     if (strcmp(path, "/tmp") == 0 || strcmp(path, "/var/tmp") == 0)
         return "🧪";
+    if (strcmp(path, "/boot") == 0)
+        return "🥾";
     if (strcmp(path, "/etc") == 0)
         return "⚙️";
+    if (strcmp(path, "/bin") == 0 || strcmp(path, "/sbin") == 0)
+        return "🧰";
+    if (strcmp(path, "/lib") == 0 || strcmp(path, "/lib64") == 0)
+        return "📚";
     if (strcmp(path, "/usr") == 0)
         return "📦";
     if (strcmp(path, "/var") == 0)
@@ -486,11 +518,11 @@ workspace_first_terminal(Workspace *ws)
 {
     GtkNotebook *nb;
 
-    if (!ws || !ws->pane_notebooks || ws->pane_notebooks->len == 0)
+    if (!ws)
         return NULL;
 
-    nb = g_ptr_array_index(ws->pane_notebooks, 0);
-    if (!GTK_IS_NOTEBOOK(nb) || gtk_notebook_get_n_pages(nb) <= 0)
+    nb = GTK_NOTEBOOK(ws->notebook);
+    if (!nb || gtk_notebook_get_n_pages(nb) <= 0)
         return NULL;
 
     return workspace_notebook_terminal_at(nb, 0);
@@ -662,10 +694,38 @@ workspace_set_active_pane(Workspace *ws, GtkNotebook *notebook)
 
     for (guint i = 0; i < ws->pane_notebooks->len; i++) {
         if (g_ptr_array_index(ws->pane_notebooks, i) == notebook) {
+            if (workspace_get_layout_mode(ws) == WORKSPACE_LAYOUT_STRIP &&
+                ws->strip_state) {
+                for (guint ci = 0; ci < ws->strip_state->columns->len; ci++) {
+                    WorkspaceColumn *col =
+                        g_ptr_array_index(ws->strip_state->columns, ci);
+
+                    if (!col || !col->panes)
+                        continue;
+
+                    for (guint pi = 0; pi < col->panes->len; pi++) {
+                        if (g_ptr_array_index(col->panes, pi) ==
+                            GTK_WIDGET(notebook)) {
+                            ws->strip_state->focused_col = (int)ci;
+                            col->focused_pane = (int)pi;
+                            break;
+                        }
+                    }
+                }
+            }
             ws->active_pane = notebook;
             return;
         }
     }
+}
+
+void
+workspace_set_primary_notebook(Workspace *ws, GtkWidget *notebook)
+{
+    if (!ws)
+        return;
+
+    workspace_assign_weak_notebook(&ws->notebook, notebook);
 }
 
 static gboolean
@@ -1863,11 +1923,81 @@ shorten_path(const char *path, char *buf, size_t bufsz)
 }
 
 static void
+compact_title_text(const char *title, char *buf, size_t bufsz)
+{
+    char compact[128];
+    size_t out = 0;
+    gboolean prev_space = FALSE;
+
+    if (!buf || bufsz == 0)
+        return;
+
+    if (!title || !title[0]) {
+        g_strlcpy(buf, "Terminal", bufsz);
+        return;
+    }
+
+    for (const char *p = title; *p && out + 1 < sizeof(compact); p++) {
+        char ch = *p;
+
+        if (g_ascii_isspace(ch)) {
+            if (out == 0 || prev_space)
+                continue;
+            compact[out++] = ' ';
+            prev_space = TRUE;
+            continue;
+        }
+
+        compact[out++] = ch;
+        prev_space = FALSE;
+    }
+
+    while (out > 0 && compact[out - 1] == ' ')
+        out--;
+    compact[out] = '\0';
+
+    if (compact[0])
+        g_snprintf(buf, bufsz, "%.36s", compact);
+    else
+        g_strlcpy(buf, "Terminal", bufsz);
+}
+
+static gboolean
+title_looks_like_path(const char *title)
+{
+    if (!title || !title[0])
+        return FALSE;
+
+    if (strcmp(title, "~") == 0 || strcmp(title, ".") == 0 ||
+        strcmp(title, "..") == 0)
+        return TRUE;
+
+    if (title[0] == '/' || title[0] == '~')
+        return TRUE;
+
+    if (g_str_has_prefix(title, "./") || g_str_has_prefix(title, "../"))
+        return TRUE;
+
+    return FALSE;
+}
+
+static void
 build_tab_label_text(GhosttyTerminal *term, const char *title, char *buf, size_t bufsz)
 {
-    /* Shorten the title (typically CWD-based) to last directory component */
-    char short_title[64];
-    shorten_path(title, short_title, sizeof(short_title));
+    char display_title[64];
+    const char *cwd = NULL;
+
+    if (title_looks_like_path(title)) {
+        shorten_path(title, display_title, sizeof(display_title));
+    } else if (title && title[0]) {
+        /* Preserve command titles so the active program remains visible. */
+        compact_title_text(title, display_title, sizeof(display_title));
+    } else if (term) {
+        cwd = ghostty_terminal_get_cwd(term);
+        shorten_path(cwd, display_title, sizeof(display_title));
+    } else {
+        g_strlcpy(display_title, "Terminal", sizeof(display_title));
+    }
 
     /* Activity indicator (green dot prefix) */
     const char *activity_prefix = "";
@@ -1898,7 +2028,7 @@ build_tab_label_text(GhosttyTerminal *term, const char *title, char *buf, size_t
         snprintf(progress_suffix, sizeof(progress_suffix), " %s %d%%", bar, pct);
     }
 
-    snprintf(buf, bufsz, "%s%s%s", activity_prefix, short_title, progress_suffix);
+    snprintf(buf, bufsz, "%s%s%s", activity_prefix, display_title, progress_suffix);
 }
 
 static void
@@ -2090,6 +2220,8 @@ on_rename_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
 static void
 start_rename(RenameData *rd)
 {
+    GtkNotebook *notebook = NULL;
+
     if (!rd || !GTK_IS_BOX(rd->event_box) || !GTK_IS_LABEL(rd->label))
         return;
     if (g_object_get_data(G_OBJECT(rd->event_box), "rename-entry"))
@@ -2097,6 +2229,15 @@ start_rename(RenameData *rd)
 
     GtkWidget *parent = rd->event_box;
     const char *current_text = gtk_label_get_text(GTK_LABEL(rd->label));
+
+    if (rd->is_workspace_row)
+        g_object_set_data(G_OBJECT(parent), "rename-activate-suppressed",
+                          GINT_TO_POINTER(1));
+    if (!rd->is_workspace_row && rd->terminal)
+        notebook = terminal_parent_notebook(rd->terminal);
+    if (notebook)
+        g_object_set_data(G_OBJECT(notebook), "tab-rename-in-progress",
+                          GINT_TO_POINTER(1));
 
     g_object_ref(rd->label);
     g_object_set_data(G_OBJECT(parent), "rename-in-progress", GINT_TO_POINTER(1));
@@ -2138,6 +2279,8 @@ start_rename(RenameData *rd)
 static void
 finish_rename(GtkEntry *entry, RenameData *rd)
 {
+    GtkNotebook *notebook = NULL;
+
     /* Guard: finish_rename can be called twice (activate + focus-leave) */
     if (!rd || !GTK_IS_BOX(rd->event_box) || !GTK_IS_LABEL(rd->label))
         return;
@@ -2164,13 +2307,18 @@ finish_rename(GtkEntry *entry, RenameData *rd)
     GtkWidget *parent = rd->event_box;
     if (g_object_get_data(G_OBJECT(parent), "rename-entry") != entry_widget)
         return;
+    if (!rd->is_workspace_row && rd->terminal)
+        notebook = terminal_parent_notebook(rd->terminal);
 
     gtk_box_remove(GTK_BOX(parent), entry_widget);
     gtk_box_append(GTK_BOX(parent), rd->label);
     gtk_widget_set_visible(rd->label, TRUE);
     g_object_set_data(G_OBJECT(parent), "rename-entry", NULL);
     g_object_set_data(G_OBJECT(parent), "rename-in-progress", NULL);
+    g_object_set_data(G_OBJECT(parent), "rename-activate-suppressed", NULL);
     g_object_set_data(G_OBJECT(rd->label), "rename-in-progress", NULL);
+    if (notebook)
+        g_object_set_data(G_OBJECT(notebook), "tab-rename-in-progress", NULL);
     g_object_unref(rd->label); /* Balance the ref from start_rename */
 
     /* Now safe to refresh sidebar */
@@ -2207,9 +2355,26 @@ on_label_double_click(GtkGestureClick *gesture, int n_press,
     if (n_press != 2) return;
 
     RenameData *rd = user_data;
-    if (rd && rd->is_workspace_row)
-        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
     start_rename(rd);
+}
+
+static GtkGestureClick *
+attach_rename_click_controller(GtkWidget *widget, RenameData *rd)
+{
+    GtkGestureClick *click;
+
+    if (!widget)
+        return NULL;
+
+    click = GTK_GESTURE_CLICK(gtk_gesture_click_new());
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click),
+                                               GTK_PHASE_CAPTURE);
+    g_signal_connect(click, "pressed",
+                     G_CALLBACK(on_label_double_click), rd);
+    gtk_widget_add_controller(widget, GTK_EVENT_CONTROLLER(click));
+    return click;
 }
 
 /*
@@ -2421,12 +2586,18 @@ create_editable_tab_label(const char *text, GtkWidget *terminal,
     /* Prevent the RenameData from leaking */
     g_object_set_data_full(G_OBJECT(box), "rename-data", rd, g_free);
 
-    GtkGesture *click = gtk_gesture_click_new();
-    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
-    g_signal_connect(click, "pressed",
-                     G_CALLBACK(on_label_double_click), rd);
-    gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(click));
-    g_object_set_data(G_OBJECT(box), "rename-click-controller", click);
+    if (is_workspace_row) {
+        GtkGestureClick *click = attach_rename_click_controller(box, rd);
+        g_object_set_data(G_OBJECT(box), "rename-click-controller", click);
+    } else {
+        GtkGestureClick *label_click = attach_rename_click_controller(label, rd);
+        GtkGestureClick *icon_click = attach_rename_click_controller(icon_stack, rd);
+        GtkGestureClick *spacer_click = attach_rename_click_controller(spacer, rd);
+
+        g_object_set_data(G_OBJECT(box), "rename-click-controller", label_click);
+        g_object_set_data(G_OBJECT(box), "rename-icon-click-controller", icon_click);
+        g_object_set_data(G_OBJECT(box), "rename-spacer-click-controller", spacer_click);
+    }
 
     /* Add close button (X) for terminal tabs, not sidebar rows */
     if (!is_workspace_row && terminal) {
@@ -2755,6 +2926,50 @@ void workspace_add_terminal_to_notebook_with_cwd(Workspace *ws,
 
 void workspace_set_shutting_down(void) {
     app_shutting_down = TRUE;
+}
+
+void
+workspace_shutdown_terminals(void)
+{
+    if (!workspaces)
+        return;
+
+    for (guint wi = 0; wi < workspaces->len; wi++) {
+        Workspace *ws = g_ptr_array_index(workspaces, wi);
+
+        if (!ws || !ws->terminals)
+            continue;
+
+        for (guint ti = 0; ti < ws->terminals->len; ti++) {
+            GtkWidget *terminal = g_ptr_array_index(ws->terminals, ti);
+
+            if (!terminal || !GHOSTTY_IS_TERMINAL(terminal))
+                continue;
+
+            ghostty_terminal_request_close(GHOSTTY_TERMINAL(terminal));
+        }
+    }
+
+#ifndef G_OS_WIN32
+    for (guint wi = 0; wi < workspaces->len; wi++) {
+        Workspace *ws = g_ptr_array_index(workspaces, wi);
+
+        if (!ws || !ws->terminals)
+            continue;
+
+        for (guint ti = 0; ti < ws->terminals->len; ti++) {
+            GtkWidget *terminal = g_ptr_array_index(ws->terminals, ti);
+
+            if (!terminal || !GHOSTTY_IS_TERMINAL(terminal))
+                continue;
+
+            if (ghostty_terminal_process_exited(GHOSTTY_TERMINAL(terminal)))
+                continue;
+
+            ghostty_terminal_hangup_session(GHOSTTY_TERMINAL(terminal));
+        }
+    }
+#endif
 }
 
 #define WORKSPACE_MOVE_DEFAULT_COL_WIDTH 600
@@ -3713,14 +3928,14 @@ workspace_detach_from_instance(int index)
     g_ptr_array_remove_index(workspaces, index);
     notifications_on_workspace_removed(index);
 
-    ws->sidebar_label = NULL;
-    ws->sidebar_meta_label = NULL;
-    ws->sidebar_status_label = NULL;
-    ws->sidebar_status_entries_box = NULL;
-    ws->sidebar_ports_label = NULL;
-    ws->sidebar_progress_label = NULL;
-    ws->sidebar_structure_label = NULL;
-    ws->sidebar_badge = NULL;
+    workspace_assign_weak_widget(&ws->sidebar_label, NULL);
+    workspace_assign_weak_widget(&ws->sidebar_meta_label, NULL);
+    workspace_assign_weak_widget(&ws->sidebar_status_label, NULL);
+    workspace_assign_weak_widget(&ws->sidebar_status_entries_box, NULL);
+    workspace_assign_weak_widget(&ws->sidebar_ports_label, NULL);
+    workspace_assign_weak_widget(&ws->sidebar_progress_label, NULL);
+    workspace_assign_weak_widget(&ws->sidebar_structure_label, NULL);
+    workspace_assign_weak_widget(&ws->sidebar_badge, NULL);
 
     if (workspaces->len == 0) {
         current_workspace = 0;
@@ -4037,14 +4252,14 @@ static GtkWidget *create_workspace_row(Workspace *ws) {
         &structure_label, &badge);
     gtk_widget_add_css_class(card, "sidebar-row");
     g_object_set_data(G_OBJECT(card), "workspace", ws);
-    ws->sidebar_label = inner_label;
-    ws->sidebar_meta_label = meta_label;
-    ws->sidebar_status_label = notification_label;
-    ws->sidebar_status_entries_box = status_entries_box;
-    ws->sidebar_ports_label = ports_label;
-    ws->sidebar_progress_label = progress_label;
-    ws->sidebar_structure_label = structure_label;
-    ws->sidebar_badge = badge;
+    workspace_assign_weak_widget(&ws->sidebar_label, inner_label);
+    workspace_assign_weak_widget(&ws->sidebar_meta_label, meta_label);
+    workspace_assign_weak_widget(&ws->sidebar_status_label, notification_label);
+    workspace_assign_weak_widget(&ws->sidebar_status_entries_box, status_entries_box);
+    workspace_assign_weak_widget(&ws->sidebar_ports_label, ports_label);
+    workspace_assign_weak_widget(&ws->sidebar_progress_label, progress_label);
+    workspace_assign_weak_widget(&ws->sidebar_structure_label, structure_label);
+    workspace_assign_weak_widget(&ws->sidebar_badge, badge);
 
     gtk_widget_add_css_class(inner_label, "sidebar-card-title");
     gtk_label_set_ellipsize(GTK_LABEL(inner_label), PANGO_ELLIPSIZE_MIDDLE);
@@ -4192,6 +4407,10 @@ on_notebook_pressed(GtkGestureClick *gesture, int n_press,
     (void)x;
     (void)y;
 
+    if (widget &&
+        g_object_get_data(G_OBJECT(widget), "tab-rename-in-progress"))
+        return;
+
     if (ws && GTK_IS_NOTEBOOK(widget))
         workspace_set_active_pane(ws, GTK_NOTEBOOK(widget));
 }
@@ -4276,7 +4495,7 @@ void workspace_add(GtkWidget *terminal_stack, GtkWidget *workspace_list, ghostty
     ws->layout_mode = app_settings_get_default_layout_mode();
 
     ws->overlay = gtk_overlay_new();
-    ws->notebook = create_pane_notebook(ws, app);
+    workspace_set_primary_notebook(ws, create_pane_notebook(ws, app));
     GtkWidget *root_child = workspace_layout_create_root(ws, ws->notebook);
     gtk_overlay_set_child(GTK_OVERLAY(ws->overlay), root_child);
     g_ptr_array_add(ws->pane_notebooks, ws->notebook);
@@ -4397,16 +4616,25 @@ workspace_get_focused_pane(Workspace *ws)
         if (fc >= 0 && fc < (int)ws->strip_state->columns->len) {
             WorkspaceColumn *col =
                 g_ptr_array_index(ws->strip_state->columns, fc);
-            if (col && col->notebook && GTK_IS_NOTEBOOK(col->notebook)) {
-                ws->active_pane = GTK_NOTEBOOK(col->notebook);
-                return GTK_NOTEBOOK(col->notebook);
+            GtkNotebook *focused_nb =
+                workspace_strip_column_focused_notebook(col);
+            if (focused_nb) {
+                ws->active_pane = focused_nb;
+                return focused_nb;
             }
         }
     }
 
     GtkNotebook *first_nb = g_ptr_array_index(ws->pane_notebooks, 0);
+    if (!first_nb)
+        return NULL;
 
-    /* Try to find the focused widget */
+    /* Prefer actual keyboard focus over the cached active_pane: cached
+     * value goes stale when focus moves to another pane via a path that
+     * doesn't run through workspace_set_active_pane (e.g. directional
+     * navigation, clicking inside the terminal surface). Falling back
+     * to active_pane only when focus is outside any pane keeps
+     * Ctrl+Shift+X close-pane targeted at the visibly-focused pane. */
     GtkRoot *root = gtk_widget_get_root(GTK_WIDGET(first_nb));
     GtkWidget *focus = root ? gtk_root_get_focus(root) : NULL;
 
@@ -4734,7 +4962,8 @@ workspace_close_current_for_layout(Workspace *ws)
         return FALSE;
 
     if (ws->notebook == focused_widget)
-        ws->notebook = g_ptr_array_index(ws->pane_notebooks, 0);
+        workspace_set_primary_notebook(ws,
+                                       g_ptr_array_index(ws->pane_notebooks, 0));
 
     if (!ws->active_pane ||
         workspace_get_pane_index(ws, ws->active_pane) < 0) {
@@ -5224,6 +5453,8 @@ workspace_navigate_pane(Workspace *ws, int dx, int dy)
     if (!best)
         return;
 
+    workspace_set_active_pane(ws, best);
+
     /* Focus the current page's first focusable child in the target pane */
     int pg = gtk_notebook_get_current_page(best);
     if (pg >= 0) {
@@ -5314,7 +5545,7 @@ workspace_close_pane(Workspace *ws, GtkNotebook *pane)
         gtk_overlay_set_child(GTK_OVERLAY(grandparent), sibling);
 
         if (GTK_IS_NOTEBOOK(sibling))
-            ws->notebook = sibling;
+            workspace_set_primary_notebook(ws, sibling);
     }
 
     g_object_unref(sibling);
@@ -5324,7 +5555,8 @@ workspace_close_pane(Workspace *ws, GtkNotebook *pane)
 
     /* Update ws->notebook if it was the closed pane */
     if (ws->notebook == pane_widget && ws->pane_notebooks->len > 0)
-        ws->notebook = g_ptr_array_index(ws->pane_notebooks, 0);
+        workspace_set_primary_notebook(ws,
+                                       g_ptr_array_index(ws->pane_notebooks, 0));
     if (ws->active_pane == pane)
         ws->active_pane = GTK_IS_NOTEBOOK(sibling) ? GTK_NOTEBOOK(sibling) : NULL;
 
@@ -5354,6 +5586,9 @@ on_notebook_switch_page(GtkNotebook *nb, GtkWidget *page,
     Workspace *ws = user_data;
 
     workspace_set_active_pane(ws, nb);
+    if (g_object_get_data(G_OBJECT(nb), "tab-rename-in-progress"))
+        return;
+
     GtkWidget *terminal = page_linked_terminal(page);
     if (terminal && GHOSTTY_IS_TERMINAL(terminal)) {
         if (ws)

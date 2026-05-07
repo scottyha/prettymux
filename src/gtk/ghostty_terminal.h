@@ -95,6 +95,9 @@ void ghostty_terminal_send_key_event(GhosttyTerminal *self,
                                      guint            keyval,
                                      guint            keycode,
                                      GdkModifierType  state);
+void ghostty_terminal_request_close(GhosttyTerminal *self);
+gboolean ghostty_terminal_process_exited(GhosttyTerminal *self);
+gboolean ghostty_terminal_hangup_session(GhosttyTerminal *self);
 
 /*
  * ghostty_terminal_queue_render:

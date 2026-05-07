@@ -46,11 +46,20 @@ ghostty_actions_action_cb(ghostty_app_t app, ghostty_target_s target,
 
     switch (action.tag) {
     case GHOSTTY_ACTION_OPEN_URL:
-        d->str1 = g_strdup(action.action.open_url.url);
+        /* ghostty's url buffer isn't NUL-terminated at the URL boundary;
+         * the explicit len field is authoritative. Using g_strdup here
+         * over-reads into adjacent memory and appends garbage. */
+        d->str1 = action.action.open_url.url
+            ? g_strndup(action.action.open_url.url,
+                        action.action.open_url.len)
+            : NULL;
         d->action.action.open_url.url = d->str1;
         break;
     case GHOSTTY_ACTION_MOUSE_OVER_LINK:
-        d->str1 = g_strdup(action.action.mouse_over_link.url);
+        d->str1 = action.action.mouse_over_link.url
+            ? g_strndup(action.action.mouse_over_link.url,
+                        action.action.mouse_over_link.len)
+            : NULL;
         d->action.action.mouse_over_link.url = d->str1;
         break;
     case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:

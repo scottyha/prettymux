@@ -21,6 +21,8 @@ typedef struct {
 } SidebarCtxDataMirror;
 
 static int session_queue_save_call_count = 0;
+static int terminal_request_close_call_count = 0;
+static int terminal_hangup_session_call_count = 0;
 
 /* ---- External stubs required by workspace.c ---- */
 
@@ -322,6 +324,10 @@ ghostty_terminal_new(const char *start_cwd)
     g_object_set_data_full(G_OBJECT(terminal), "stub-title",
                            g_strdup("stub-title"),
                            g_free);
+    g_object_set_data(G_OBJECT(terminal), "stub-session-id",
+                      GINT_TO_POINTER(0));
+    g_object_set_data(G_OBJECT(terminal), "stub-process-exited",
+                      GINT_TO_POINTER(0));
     return terminal;
 }
 
@@ -337,6 +343,13 @@ ghostty_terminal_get_title(GhosttyTerminal *self)
 {
     const char *title = g_object_get_data(G_OBJECT(self), "stub-title");
     return (title && title[0]) ? title : "stub-title";
+}
+
+pid_t
+ghostty_terminal_get_session_id(GhosttyTerminal *self)
+{
+    return (pid_t)GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(self), "stub-session-id"));
 }
 
 void
@@ -361,6 +374,35 @@ void
 ghostty_terminal_queue_render(GhosttyTerminal *self)
 {
     (void)self;
+}
+
+void
+ghostty_terminal_request_close(GhosttyTerminal *self)
+{
+    terminal_request_close_call_count++;
+    g_object_set_data(G_OBJECT(self), "stub-close-requested",
+                      GINT_TO_POINTER(1));
+}
+
+gboolean
+ghostty_terminal_process_exited(GhosttyTerminal *self)
+{
+    return GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(self), "stub-process-exited")) != 0;
+}
+
+gboolean
+ghostty_terminal_hangup_session(GhosttyTerminal *self)
+{
+    pid_t sid = ghostty_terminal_get_session_id(self);
+
+    if (sid <= 0)
+        return FALSE;
+
+    terminal_hangup_session_call_count++;
+    g_object_set_data(G_OBJECT(self), "stub-session-hung-up",
+                      GINT_TO_POINTER(1));
+    return TRUE;
 }
 
 void
@@ -500,6 +542,8 @@ reset_workspace_globals(void)
     g_terminal_stack = NULL;
     g_workspace_list = NULL;
     session_queue_save_call_count = 0;
+    terminal_request_close_call_count = 0;
+    terminal_hangup_session_call_count = 0;
 }
 
 static GtkEventController *
@@ -651,6 +695,28 @@ init_two_workspace_runtime(GtkWidget **terminal_stack_out,
         *terminal_stack_out = terminal_stack;
     if (workspace_list_out)
         *workspace_list_out = workspace_list;
+}
+
+static GtkWidget *
+tab_inner_label(GtkWidget *tab_widget)
+{
+    for (GtkWidget *child = gtk_widget_get_first_child(tab_widget);
+         child;
+         child = gtk_widget_get_next_sibling(child)) {
+        if (GTK_IS_LABEL(child))
+            return child;
+    }
+    return NULL;
+}
+
+static GtkWidget *
+tab_emoji_label(GtkWidget *tab_widget)
+{
+    GtkWidget *icon_stack = g_object_get_data(G_OBJECT(tab_widget),
+                                              "row-icon-widget");
+    if (!GTK_IS_STACK(icon_stack))
+        return NULL;
+    return g_object_get_data(G_OBJECT(icon_stack), "row-icon-label");
 }
 
 static const ShortcutDef *
@@ -1287,6 +1353,44 @@ test_workspace_sidebar_card_double_click_starts_inline_rename(void)
 }
 
 static void
+test_workspace_terminal_tab_double_click_starts_inline_rename(void)
+{
+    GtkWidget *terminal_stack;
+    GtkWidget *workspace_list;
+    Workspace *ws;
+    GtkNotebook *nb;
+    GtkWidget *page;
+    GtkWidget *tab_widget;
+    GtkGestureClick *click;
+    GtkWidget *rename_entry;
+
+    require_display_or_skip();
+    reset_workspace_globals();
+
+    init_two_workspace_runtime(&terminal_stack, &workspace_list);
+    workspace_switch(0, terminal_stack, workspace_list);
+
+    ws = g_ptr_array_index(workspaces, 0);
+    nb = g_ptr_array_index(ws->pane_notebooks, 0);
+    g_assert_true(GTK_IS_NOTEBOOK(nb));
+    page = gtk_notebook_get_nth_page(nb, 0);
+    g_assert_nonnull(page);
+    tab_widget = gtk_notebook_get_tab_label(nb, page);
+    g_assert_nonnull(tab_widget);
+
+    click = GTK_GESTURE_CLICK(g_object_get_data(G_OBJECT(tab_widget),
+                                                "rename-click-controller"));
+    g_assert_true(GTK_IS_GESTURE_CLICK(click));
+    g_signal_emit_by_name(click, "pressed", 2, 0.0, 0.0);
+
+    rename_entry = g_object_get_data(G_OBJECT(tab_widget), "rename-entry");
+    g_assert_true(GTK_IS_ENTRY(rename_entry));
+    g_assert_cmpint(current_workspace, ==, 0);
+
+    reset_workspace_globals();
+}
+
+static void
 test_workspace_sidebar_card_rename_focus_leave_commits_and_saves(void)
 {
     GtkWidget *terminal_stack;
@@ -1392,6 +1496,70 @@ test_workspace_sidebar_card_rename_escape_cancels_without_save(void)
                     "Workspace 2");
     g_assert_cmpint(session_queue_save_call_count, ==, 0);
     g_assert_cmpint(current_workspace, ==, 0);
+
+    reset_workspace_globals();
+}
+
+static void
+test_workspace_tab_labels_preserve_command_titles_and_system_icons(void)
+{
+    GtkWidget *terminal_stack;
+    GtkWidget *workspace_list;
+    Workspace *ws;
+    GtkNotebook *nb;
+    GtkWidget *page0;
+    GtkWidget *tab0;
+    GtkWidget *label0;
+    GtkWidget *terminal0;
+    GtkWidget *page1;
+    GtkWidget *tab1;
+    GtkWidget *emoji1;
+    GtkWidget *page2;
+    GtkWidget *tab2;
+    GtkWidget *emoji2;
+
+    require_display_or_skip();
+    reset_workspace_globals();
+
+    init_two_workspace_runtime(&terminal_stack, &workspace_list);
+    workspace_switch(0, terminal_stack, workspace_list);
+
+    ws = g_ptr_array_index(workspaces, 0);
+    nb = g_ptr_array_index(ws->pane_notebooks, 0);
+    g_assert_true(GTK_IS_NOTEBOOK(nb));
+
+    page0 = gtk_notebook_get_nth_page(nb, 0);
+    tab0 = gtk_notebook_get_tab_label(nb, page0);
+    label0 = tab_inner_label(tab0);
+    terminal0 = g_object_get_data(G_OBJECT(page0), "linked-terminal");
+    g_assert_true(GTK_IS_LABEL(label0));
+    g_assert_true(GHOSTTY_IS_TERMINAL(terminal0));
+
+    g_object_set_data_full(G_OBJECT(terminal0), "stub-title",
+                           g_strdup("nvim README.md"), g_free);
+    workspace_refresh_tab_labels(ws);
+    g_assert_cmpstr(gtk_label_get_text(GTK_LABEL(label0)), ==,
+                    "nvim README.md");
+
+    g_object_set_data_full(G_OBJECT(terminal0), "stub-title",
+                           g_strdup("/etc/nginx"), g_free);
+    workspace_refresh_tab_labels(ws);
+    g_assert_cmpstr(gtk_label_get_text(GTK_LABEL(label0)), ==,
+                    ".../nginx");
+
+    workspace_add_terminal_to_notebook_with_cwd(ws, nb, NULL, "/boot");
+    page1 = gtk_notebook_get_nth_page(nb, 1);
+    tab1 = gtk_notebook_get_tab_label(nb, page1);
+    emoji1 = tab_emoji_label(tab1);
+    g_assert_true(GTK_IS_LABEL(emoji1));
+    g_assert_cmpstr(gtk_label_get_text(GTK_LABEL(emoji1)), ==, "🥾");
+
+    workspace_add_terminal_to_notebook_with_cwd(ws, nb, NULL, "/bin");
+    page2 = gtk_notebook_get_nth_page(nb, 2);
+    tab2 = gtk_notebook_get_tab_label(nb, page2);
+    emoji2 = tab_emoji_label(tab2);
+    g_assert_true(GTK_IS_LABEL(emoji2));
+    g_assert_cmpstr(gtk_label_get_text(GTK_LABEL(emoji2)), ==, "🧰");
 
     reset_workspace_globals();
 }
@@ -1594,6 +1762,44 @@ test_strip_vertical_split_pane_focus_up_down(void)
 }
 
 static void
+test_strip_vertical_split_inserts_after_focused_pane(void)
+{
+    require_display_or_skip();
+
+    Workspace *ws = make_strip_workspace_with_vertical_split(1);
+    WorkspaceColumn *col = g_ptr_array_index(ws->strip_state->columns, 0);
+    GtkNotebook *top_pane;
+    GtkNotebook *bottom_pane;
+    GtkNotebook *inserted_pane;
+
+    g_assert_nonnull(col->panes);
+    g_assert_cmpuint(col->panes->len, ==, 2);
+
+    top_pane = g_ptr_array_index(col->panes, 0);
+    bottom_pane = g_ptr_array_index(col->panes, 1);
+
+    g_assert_true(workspace_strip_focus_pane_up(ws));
+    g_assert_true(ws->active_pane == top_pane);
+    g_assert_cmpint(col->focused_pane, ==, 0);
+
+    g_assert_true(workspace_split_current_for_layout(ws,
+                                                     GTK_ORIENTATION_VERTICAL,
+                                                     NULL));
+
+    g_assert_cmpuint(col->panes->len, ==, 3);
+    inserted_pane = g_ptr_array_index(col->panes, 1);
+    g_assert_true(g_ptr_array_index(col->panes, 0) == top_pane);
+    g_assert_true(g_ptr_array_index(col->panes, 2) == bottom_pane);
+    g_assert_true(GTK_IS_NOTEBOOK(inserted_pane));
+    g_assert_true(inserted_pane != top_pane);
+    g_assert_true(inserted_pane != bottom_pane);
+    g_assert_cmpint(col->focused_pane, ==, 1);
+    g_assert_true(ws->active_pane == inserted_pane);
+
+    free_workspace_fixture(ws);
+}
+
+static void
 test_strip_tab_switch_within_pane(void)
 {
     require_display_or_skip();
@@ -1704,6 +1910,48 @@ test_strip_column_pane_count_api(void)
     free_workspace_fixture(ws);
 }
 
+static void
+test_workspace_shutdown_terminals_requests_close_and_hangs_running_sessions(void)
+{
+    require_display_or_skip();
+    reset_workspace_globals();
+
+    workspaces = g_ptr_array_new();
+
+    Workspace *ws0 = make_classic_workspace_with_tabs(2);
+    Workspace *ws1 = make_classic_workspace_with_tabs(1);
+    GtkWidget *term0 = g_ptr_array_index(ws0->terminals, 0);
+    GtkWidget *term1 = g_ptr_array_index(ws0->terminals, 1);
+    GtkWidget *term2 = g_ptr_array_index(ws1->terminals, 0);
+
+    g_object_set_data(G_OBJECT(term0), "stub-session-id", GINT_TO_POINTER(101));
+    g_object_set_data(G_OBJECT(term1), "stub-session-id", GINT_TO_POINTER(102));
+    g_object_set_data(G_OBJECT(term1), "stub-process-exited", GINT_TO_POINTER(1));
+    g_object_set_data(G_OBJECT(term2), "stub-session-id", GINT_TO_POINTER(0));
+
+    g_ptr_array_add(workspaces, ws0);
+    g_ptr_array_add(workspaces, ws1);
+
+    workspace_shutdown_terminals();
+
+    g_assert_cmpint(terminal_request_close_call_count, ==, 3);
+    g_assert_cmpint(terminal_hangup_session_call_count, ==, 1);
+    g_assert_true(GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(term0), "stub-close-requested")) != 0);
+    g_assert_true(GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(term1), "stub-close-requested")) != 0);
+    g_assert_true(GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(term2), "stub-close-requested")) != 0);
+    g_assert_true(GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(term0), "stub-session-hung-up")) != 0);
+    g_assert_false(GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(term1), "stub-session-hung-up")) != 0);
+    g_assert_false(GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(term2), "stub-session-hung-up")) != 0);
+
+    reset_workspace_globals();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1737,6 +1985,8 @@ main(int argc, char **argv)
                     test_strip_vertical_split_keeps_column_count);
     g_test_add_func("/workspace-phase4/focus/strip-pane-up-down",
                     test_strip_vertical_split_pane_focus_up_down);
+    g_test_add_func("/workspace-phase4/split/strip-vertical-after-focused-pane",
+                    test_strip_vertical_split_inserts_after_focused_pane);
     g_test_add_func("/workspace-phase4/tab/strip-tab-switch-within-pane",
                     test_strip_tab_switch_within_pane);
     g_test_add_func("/workspace-phase4/focus/strip-left-right-navigates-columns",
@@ -1767,16 +2017,22 @@ main(int argc, char **argv)
                     test_workspace_sidebar_card_reorder_keeps_drop_controller_available);
     g_test_add_func("/workspace-interactions/card/rename-double-click-starts-inline",
                     test_workspace_sidebar_card_double_click_starts_inline_rename);
+    g_test_add_func("/workspace-interactions/tab/rename-double-click-starts-inline",
+                    test_workspace_terminal_tab_double_click_starts_inline_rename);
     g_test_add_func("/workspace-interactions/card/rename-focus-leave-commits",
                     test_workspace_sidebar_card_rename_focus_leave_commits_and_saves);
     g_test_add_func("/workspace-interactions/card/rename-escape-cancels",
                     test_workspace_sidebar_card_rename_escape_cancels_without_save);
+    g_test_add_func("/workspace-interactions/tab/title-format-and-system-icons",
+                    test_workspace_tab_labels_preserve_command_titles_and_system_icons);
     g_test_add_func("/workspace-regressions/git-detect/freed-workspace-callback",
                     test_workspace_detect_git_callback_ignores_freed_workspace);
     g_test_add_func("/workspace-phase10/attach/inserts-at-target-index",
                     test_workspace_attach_to_instance_inserts_at_target_index);
     g_test_add_func("/workspace-phase10/import/preserve-serial-on-collision",
                     test_workspace_import_preserves_serial_on_collision);
+    g_test_add_func("/workspace-shutdown/terminals/request-close-and-hangup",
+                    test_workspace_shutdown_terminals_requests_close_and_hangs_running_sessions);
 
     return g_test_run();
 }

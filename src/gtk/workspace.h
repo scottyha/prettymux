@@ -211,8 +211,10 @@ gboolean    workspace_get_sidebar_progress(Workspace *ws,
                                            int *percent_out);
 
 void workspace_focus_first_terminal(Workspace *ws);
+void workspace_set_primary_notebook(Workspace *ws, GtkWidget *notebook);
 
 void workspace_set_shutting_down(void);
+void workspace_shutdown_terminals(void);
 gboolean workspace_move_tab(int src_ws_idx, int src_pane_idx, int src_tab_idx,
                             int dest_ws_idx, int dest_pane_idx);
 Workspace *workspace_detach_from_instance(int index);

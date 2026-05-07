@@ -459,6 +459,38 @@ test_row_activation_prefers_rename_entry_over_workspace_switch(void)
 }
 
 static void
+test_row_activation_prefers_rename_in_progress_over_workspace_switch(void)
+{
+    GtkWidget *row;
+    GtkWidget *card;
+    GtkWidget *header_box;
+    GtkWidget *meta = NULL, *status = NULL, *status_entries = NULL;
+    GtkWidget *ports = NULL, *progress = NULL, *structure = NULL, *badge = NULL;
+
+    require_display_or_skip();
+    reset_stub_counters();
+
+    ui.terminal_stack = gtk_stack_new();
+    sidebar_ui_build();
+
+    row = gtk_list_box_row_new();
+    header_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    g_object_set_data(G_OBJECT(header_box), "rename-in-progress",
+                      GINT_TO_POINTER(1));
+    card = sidebar_ui_build_workspace_card(header_box,
+                                           &meta, &status, &status_entries,
+                                           &ports, &progress, &structure, &badge);
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), card);
+    gtk_list_box_append(GTK_LIST_BOX(ui.workspace_list), row);
+
+    g_signal_emit_by_name(ui.workspace_list, "row-activated",
+                          GTK_LIST_BOX_ROW(row));
+
+    g_assert_cmpint(workspace_switch_call_count, ==, 0);
+    g_assert_cmpint(session_queue_save_call_count, ==, 0);
+}
+
+static void
 test_row_activation_switches_workspace_when_not_renaming(void)
 {
     GtkWidget *row0;
@@ -678,6 +710,8 @@ main(int argc, char **argv)
                     test_workspace_card_sets_compact_truncation_properties);
     g_test_add_func("/sidebar-ui/row-activation/rename-short-circuit",
                     test_row_activation_prefers_rename_entry_over_workspace_switch);
+    g_test_add_func("/sidebar-ui/row-activation/rename-in-progress-short-circuit",
+                    test_row_activation_prefers_rename_in_progress_over_workspace_switch);
     g_test_add_func("/sidebar-ui/row-activation/switch-and-save",
                     test_row_activation_switches_workspace_when_not_renaming);
     g_test_add_func("/sidebar-ui/move-to-window/routes-modal",

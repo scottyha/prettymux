@@ -135,12 +135,18 @@ on_workspace_row_activated(GtkListBox *list, GtkListBoxRow *row, gpointer user_d
     GtkWidget *child;
     GtkWidget *header_box;
     GtkWidget *rename_entry;
+    gboolean rename_in_progress = FALSE;
+    gboolean rename_suppressed = FALSE;
 
     (void)list;
     (void)user_data;
 
     child = gtk_list_box_row_get_child(row);
     header_box = child ? g_object_get_data(G_OBJECT(child), "header-box") : NULL;
+    rename_in_progress = header_box &&
+        g_object_get_data(G_OBJECT(header_box), "rename-in-progress");
+    rename_suppressed = header_box &&
+        g_object_get_data(G_OBJECT(header_box), "rename-activate-suppressed");
     rename_entry = header_box
         ? g_object_get_data(G_OBJECT(header_box), "rename-entry") : NULL;
     if (!rename_entry && child)
@@ -149,6 +155,8 @@ on_workspace_row_activated(GtkListBox *list, GtkListBoxRow *row, gpointer user_d
         gtk_widget_grab_focus(rename_entry);
         return;
     }
+    if (rename_in_progress || rename_suppressed)
+        return;
 
     workspace_switch(gtk_list_box_row_get_index(row),
                      ui.terminal_stack, ui.workspace_list);
