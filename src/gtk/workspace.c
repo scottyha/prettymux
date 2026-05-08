@@ -2217,6 +2217,23 @@ on_rename_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
     return FALSE;
 }
 
+static gboolean
+rename_grab_focus_idle_cb(gpointer user_data)
+{
+    GtkWidget *entry = GTK_WIDGET(user_data);
+    if (!GTK_IS_ENTRY(entry))
+        goto out;
+    GtkRoot *root = gtk_widget_get_root(entry);
+    if (GTK_IS_WINDOW(root))
+        gtk_window_set_focus(GTK_WINDOW(root), entry);
+    else
+        gtk_widget_grab_focus(entry);
+    gtk_editable_select_region(GTK_EDITABLE(entry), 0, -1);
+out:
+    g_object_unref(entry);
+    return G_SOURCE_REMOVE;
+}
+
 static void
 start_rename(RenameData *rd)
 {
@@ -2272,7 +2289,18 @@ start_rename(RenameData *rd)
     gtk_box_append(GTK_BOX(parent), entry);
     gtk_widget_set_visible(entry, TRUE);
     gtk_widget_set_size_request(entry, 120, -1);
-    gtk_widget_grab_focus(entry);
+
+    /* Notebook tab labels (and listbox rows) are special-cased in
+     * GTK4: pointer/focus management inside the header strip
+     * actively pulls keyboard focus back. Calling grab_focus from
+     * inside the click handler races GTK's own focus settlement and
+     * leaves the entry visible but un-focused — every keystroke
+     * (including Escape) goes to the terminal, the user can't type
+     * or cancel, and prettymux looks frozen. Defer to an idle so the
+     * click/layout settles, then grab via gtk_window_set_focus which
+     * is more authoritative than gtk_widget_grab_focus alone. */
+    g_object_ref(entry);
+    g_idle_add(rename_grab_focus_idle_cb, entry);
     gtk_widget_queue_draw(parent);
 }
 
@@ -4605,9 +4633,17 @@ void workspace_switch(int index, GtkWidget *terminal_stack, GtkWidget *workspace
 /*
  * workspace_get_focused_pane:
  *
- * Walk the workspace's pane notebooks and find which one contains the
- * widget that currently has keyboard focus.  Falls back to the first
- * notebook.
+ * Resolves the pane whose terminal currently has GTK keyboard focus,
+ * across all layout modes. Side effect: on a focus-walk hit, calls
+ * workspace_set_active_pane() to sync layout-specific tracking
+ * (strip_state->focused_col, ws->active_pane) so subsequent operations
+ * stay aligned with the visibly-focused pane.
+ *
+ * Fallback order when GTK focus is outside any pane (URL bar, sidebar,
+ * command palette, etc.):
+ *   1. strip_state->focused_col (strip layout only)
+ *   2. cached ws->active_pane
+ *   3. first pane notebook
  */
 GtkNotebook *
 workspace_get_focused_pane(Workspace *ws)
@@ -4615,6 +4651,43 @@ workspace_get_focused_pane(Workspace *ws)
     if (!ws || !ws->pane_notebooks || ws->pane_notebooks->len == 0)
         return ws ? GTK_NOTEBOOK(ws->notebook) : NULL;
 
+    GtkNotebook *first_nb = g_ptr_array_index(ws->pane_notebooks, 0);
+    if (!first_nb)
+        return NULL;
+
+    /* Real GTK keyboard focus is authoritative across all layout
+     * modes. Strip layout's strip_state->focused_col only updates via
+     * directional navigation and column insert/remove — it does NOT
+     * react to a click on a terminal surface in another column. If we
+     * trust focused_col first, every shortcut that resolves the
+     * "current" pane (paste, new-tab, copy, search, close, ...) goes
+     * to the wrong pane after the user splits and clicks back. So
+     * walk the focus first, then sync layout-specific tracking via
+     * workspace_set_active_pane (which also updates focused_col). */
+    GtkRoot *root = gtk_widget_get_root(GTK_WIDGET(first_nb));
+    GtkWidget *focus = root ? gtk_root_get_focus(root) : NULL;
+
+    if (focus) {
+        for (GtkWidget *w = focus; w != NULL; w = gtk_widget_get_parent(w)) {
+            GtkNotebook *candidate = NULL;
+            if (GTK_IS_NOTEBOOK(w) &&
+                workspace_has_pane(ws, GTK_NOTEBOOK(w))) {
+                candidate = GTK_NOTEBOOK(w);
+            } else if (GHOSTTY_IS_TERMINAL(w)) {
+                GtkNotebook *nb = terminal_parent_notebook(w);
+                if (workspace_has_pane(ws, nb))
+                    candidate = nb;
+            }
+            if (candidate) {
+                workspace_set_active_pane(ws, candidate);
+                return candidate;
+            }
+        }
+    }
+
+    /* Focus is outside any pane (URL bar, sidebar, command palette,
+     * etc.). Fall back to layout-specific tracking, then the cached
+     * active pane. */
     if (workspace_get_layout_mode(ws) == WORKSPACE_LAYOUT_STRIP &&
         ws->strip_state) {
         int fc = ws->strip_state->focused_col;
@@ -4626,40 +4699,6 @@ workspace_get_focused_pane(Workspace *ws)
             if (focused_nb) {
                 ws->active_pane = focused_nb;
                 return focused_nb;
-            }
-        }
-    }
-
-    GtkNotebook *first_nb = g_ptr_array_index(ws->pane_notebooks, 0);
-    if (!first_nb)
-        return NULL;
-
-    /* Prefer actual keyboard focus over the cached active_pane: cached
-     * value goes stale when focus moves to another pane via a path that
-     * doesn't run through workspace_set_active_pane (e.g. directional
-     * navigation, clicking inside the terminal surface). Falling back
-     * to active_pane only when focus is outside any pane keeps
-     * Ctrl+Shift+X close-pane targeted at the visibly-focused pane. */
-    GtkRoot *root = gtk_widget_get_root(GTK_WIDGET(first_nb));
-    GtkWidget *focus = root ? gtk_root_get_focus(root) : NULL;
-
-    if (focus) {
-        GtkWidget *w;
-        for (w = focus; w != NULL; w = gtk_widget_get_parent(w)) {
-            if (GTK_IS_NOTEBOOK(w)) {
-                guint i;
-                for (i = 0; i < ws->pane_notebooks->len; i++) {
-                    if (g_ptr_array_index(ws->pane_notebooks, i) == w) {
-                        ws->active_pane = GTK_NOTEBOOK(w);
-                        return GTK_NOTEBOOK(w);
-                    }
-                }
-            } else if (GHOSTTY_IS_TERMINAL(w)) {
-                GtkNotebook *nb = terminal_parent_notebook(w);
-                if (workspace_has_pane(ws, nb)) {
-                    ws->active_pane = nb;
-                    return nb;
-                }
             }
         }
     }
@@ -5652,6 +5691,16 @@ on_sidebar_ctx_rename_activate(GSimpleAction *action, GVariant *param,
     start_rename(rd);
 }
 
+static gboolean
+sidebar_ctx_delete_idle_cb(gpointer data)
+{
+    int ws_idx = GPOINTER_TO_INT(data);
+    if (g_terminal_stack && g_workspace_list &&
+        workspaces && ws_idx >= 0 && ws_idx < (int)workspaces->len)
+        workspace_remove(ws_idx, g_terminal_stack, g_workspace_list);
+    return G_SOURCE_REMOVE;
+}
+
 static void
 on_sidebar_ctx_delete_activate(GSimpleAction *action, GVariant *param,
                                gpointer user_data)
@@ -5660,8 +5709,17 @@ on_sidebar_ctx_delete_activate(GSimpleAction *action, GVariant *param,
     (void)param;
     SidebarCtxData *ctx = user_data;
     int ws_idx = ctx && ctx->workspace ? workspace_get_index(ctx->workspace) : -1;
-    if (g_terminal_stack && g_workspace_list && ws_idx >= 0)
-        workspace_remove(ws_idx, g_terminal_stack, g_workspace_list);
+    if (ws_idx < 0)
+        return;
+
+    /* Defer the actual removal: this handler is running inside the
+     * action-group activate dispatch on the row's card. Calling
+     * workspace_remove synchronously destroys that card, which
+     * destroys the action group, popover, and ctx pointer while we
+     * are still on the stack — corrupts state and the next sidebar
+     * delete crashes the app. Idle dispatch lets activate unwind
+     * first, the popover close itself, and the gesture release. */
+    g_idle_add(sidebar_ctx_delete_idle_cb, GINT_TO_POINTER(ws_idx));
 }
 
 static void
