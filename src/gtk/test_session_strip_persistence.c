@@ -487,6 +487,16 @@ workspace_split_current_for_layout(Workspace *ws, GtkOrientation orientation, gh
     return test_workspace_insert_pane_after(ws, anchor) != NULL;
 }
 
+void
+workspace_set_primary_notebook(Workspace *ws, GtkWidget *notebook)
+{
+    if (!ws)
+        return;
+
+    ws->notebook = notebook;
+    ws->active_pane = GTK_IS_NOTEBOOK(notebook) ? GTK_NOTEBOOK(notebook) : NULL;
+}
+
 GtkNotebook *
 workspace_split_pane_target(Workspace *ws, GtkNotebook *pane, GtkOrientation orientation, ghostty_app_t app)
 {

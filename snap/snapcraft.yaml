@@ -1,6 +1,6 @@
 name: prettymux
 base: core24
-version: '0.2.29'
+version: '0.2.30'
 license: GPL-3.0-only
 summary: GPU-accelerated terminal multiplexer
 description: |
@@ -25,10 +25,16 @@ parts:
     plugin: nil
     source: ./ghostty
     build-packages:
-      - zig
+      - curl
+      - xz-utils
     override-build: |
       cd $CRAFT_PART_SRC
-      zig build \
+      export ZIG_VERSION=0.15.2
+      export ZIG_DIR="$CRAFT_PART_BUILD/zig"
+      mkdir -p "$ZIG_DIR"
+      curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+        | tar -xJ -C "$ZIG_DIR" --strip-components=1
+      "$ZIG_DIR/zig" build \
         -Dapp-runtime=none \
         -Doptimize=ReleaseFast \
         -Dtarget=x86_64-linux-gnu
