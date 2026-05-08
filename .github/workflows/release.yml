@@ -59,11 +59,14 @@ jobs:
           echo "Layout:"
           find . -type f | head -20
 
+      - name: Pack ghostty tree
+        run: tar czf ghostty-prebuilt.tar.gz ghostty
+
       - name: Upload ghostty tree
         uses: actions/upload-artifact@v6
         with:
           name: ghostty-prebuilt
-          path: ghostty/
+          path: ghostty-prebuilt.tar.gz
 
   # ---------------------------------------------------------------------------
   # Ubuntu 24.04 LTS
@@ -82,7 +85,10 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           name: ghostty-prebuilt
-          path: ghostty
+          path: .
+
+      - name: Extract prebuilt ghostty
+        run: tar xzf ghostty-prebuilt.tar.gz
 
       - name: Resolve ghostty directory
         run: |
@@ -153,7 +159,10 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           name: ghostty-prebuilt
-          path: ghostty
+          path: .
+
+      - name: Extract prebuilt ghostty
+        run: tar xzf ghostty-prebuilt.tar.gz
 
       - name: Verify ghostty layout
         run: |
@@ -363,7 +372,10 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           name: ghostty-prebuilt
-          path: ghostty
+          path: .
+
+      - name: Extract prebuilt ghostty
+        run: tar xzf ghostty-prebuilt.tar.gz
 
       - name: Install Flatpak Builder
         run: |
@@ -407,7 +419,10 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           name: ghostty-prebuilt
-          path: ghostty
+          path: .
+
+      - name: Extract prebuilt ghostty
+        run: tar xzf ghostty-prebuilt.tar.gz
 
       - name: Build prettymux
         run: |
@@ -607,7 +622,10 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           name: ghostty-prebuilt
-          path: ghostty
+          path: .
+
+      - name: Extract prebuilt ghostty
+        run: tar xzf ghostty-prebuilt.tar.gz
 
       - name: Install dependencies
         run: |
